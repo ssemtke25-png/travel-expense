@@ -80,6 +80,31 @@ def load_fuel_efficiency() -> pd.DataFrame:
         return pd.DataFrame(columns=["제조사", "모델명", "연료", "복합연비"])
 
 
+@st.cache_data(ttl=1800)
+def load_oil_history() -> pd.DataFrame:
+    """
+    유가 누적 CSV 로드 (GitHub Actions가 매일 수집).
+    컬럼: 날짜, 지역(전국/경북), 유종, 가격
+    아직 파일이 없으면 빈 DataFrame 반환 (앱은 정상 작동).
+    """
+    try:
+        df = pd.read_csv("data/oil_history.csv")
+        df["날짜"] = df["날짜"].astype(str)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["날짜", "지역", "유종", "가격"])
+
+
+def lookup_oil_price(hist: pd.DataFrame, date_str: str, region: str, fuel: str):
+    """누적 CSV에서 특정 날짜·지역·유종의 유가를 찾는다. 없으면 None."""
+    if hist.empty:
+        return None
+    m = hist[(hist["날짜"] == date_str) & (hist["지역"] == region) & (hist["유종"] == fuel)]
+    if m.empty:
+        return None
+    return float(m.iloc[0]["가격"])
+
+
 # =============================================================
 # 오피넷 유가 API
 # =============================================================
@@ -160,10 +185,13 @@ def get_road_distance(origin_xy, dest_xy):
     """
     좌표 → 도로 주행거리(m), 소요시간(s).
     카카오모빌리티 자동차 길찾기 API. ★사용 권한 승인 필요★
-    캐싱으로 동일 경로 재호출 최소화.
+    반환: {"ok": True, ...} 또는 {"ok": False, "reason": "..."}
+    실패 사유를 구분해 UI에서 안내를 다르게 보여준다.
     """
-    if not KAKAO_REST_KEY or not origin_xy or not dest_xy:
-        return None
+    if not KAKAO_REST_KEY:
+        return {"ok": False, "reason": "카카오 키가 설정되지 않았습니다."}
+    if not origin_xy or not dest_xy:
+        return {"ok": False, "reason": "좌표가 없습니다."}
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
     params = {
         "origin": f"{origin_xy[0]},{origin_xy[1]}",
@@ -172,16 +200,20 @@ def get_road_distance(origin_xy, dest_xy):
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
+        # 권한 미승인 시 401/403 계열
+        if r.status_code in (401, 403):
+            return {"ok": False, "reason": "길찾기 API 사용 권한이 아직 승인되지 않았습니다. "
+                                           "카카오 데브톡 승인 후 자동으로 작동합니다."}
         r.raise_for_status()
         summary = r.json()["routes"][0]["summary"]
         return {
+            "ok": True,
             "distance_m": summary["distance"],
             "duration_s": summary["duration"],
             "toll": summary.get("fare", {}).get("toll", 0),
         }
     except Exception as e:
-        st.warning(f"길찾기 실패 (권한 승인 여부 확인): {e}")
-        return None
+        return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
 
 
 # =============================================================
@@ -291,35 +323,81 @@ with tab2:
     eff = c5.number_input("복합연비(km/L)", min_value=0.0, value=default_eff, step=0.1,
                           help="모델 선택 시 자동 입력. 수정 가능.")
 
-    st.markdown("##### 3) 유가")
-    c6, c7 = st.columns(2)
+    st.markdown("##### 3) 유가 (날짜 선택 → 자동 입력)")
+    hist = load_oil_history()
+    c6, c7, c8, c9 = st.columns([1.2, 1, 1.2, 1])
+
     fuel_type = c6.selectbox("유종", ["휘발유", "경유", "자동차용LPG"],
                              index=["휘발유", "경유", "자동차용LPG"].index(
                                  default_fuel if default_fuel in ["휘발유", "경유"] else
                                  ("자동차용LPG" if default_fuel == "LPG" else "휘발유")))
-    oil_price = c7.number_input("적용 유가(원/L)", min_value=0.0, value=0.0, step=1.0,
-                                help="오피넷 조회값을 참고해 입력. 추후 자동 연동 예정.")
+    region = c7.selectbox("지역 기준", ["전국", "경북"],
+                          help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요.")
 
-    # --- 계산 ---
+    # 누적 CSV에 있는 날짜 목록 (최신순). 없으면 안내.
+    if not hist.empty:
+        avail_dates = sorted(hist["날짜"].unique().tolist(), reverse=True)
+    else:
+        avail_dates = []
+
+    auto_price = None
+    if avail_dates:
+        sel_date = c8.selectbox("유가 기준일", avail_dates,
+                                help="누적 수집된 날짜 중 선택. 최대 약 2개월치.")
+        auto_price = lookup_oil_price(hist, sel_date, region, fuel_type)
+    else:
+        c8.selectbox("유가 기준일", ["(누적 데이터 없음)"], disabled=True)
+        sel_date = None
+
+    # 자동값이 있으면 기본값으로, 없으면 수기 입력
+    default_price = auto_price if auto_price is not None else 0.0
+    oil_price = c9.number_input("적용 유가(원/L)", min_value=0.0,
+                                value=float(default_price), step=1.0,
+                                help="선택한 날짜·지역·유종의 오피넷 값이 자동 입력됩니다. 수정 가능.")
+
+    if avail_dates and auto_price is not None:
+        st.caption(f"✅ {sel_date} · {region} · {fuel_type} 유가 자동 적용: {auto_price:,.2f} 원/L")
+    elif avail_dates and auto_price is None:
+        st.caption(f"⚠️ {sel_date} · {region} · {fuel_type} 데이터가 없어 수기 입력이 필요합니다.")
+    else:
+        st.caption("ⓘ 유가 누적 데이터가 아직 쌓이지 않았습니다. GitHub Actions가 매일 수집하며, "
+                   "며칠 후부터 날짜 선택이 가능해집니다. 그전까지는 유가를 수기 입력하세요.")
+
+    # --- 계산 (단계별 에러 구분) ---
     if st.button("거리 · 유류비 계산", type="primary"):
-        o_xy = geocode(origin) if origin else None
-        d_xy = geocode(dest) if dest else None
-        if not o_xy or not d_xy:
-            st.error("주소를 좌표로 변환하지 못했습니다. 주소를 확인하거나 카카오 키 설정을 확인하세요.")
+        if not origin or not dest:
+            st.error("출발지와 도착지 주소를 모두 입력하세요.")
         else:
-            route = get_road_distance(o_xy, d_xy)
-            if not route:
-                st.error("도로거리 조회 실패. 길찾기 API 권한 승인 여부를 확인하세요.")
+            o_xy = geocode(origin)
+            d_xy = geocode(dest)
+            # 1단계: 지오코딩 실패 구분
+            if not o_xy or not d_xy:
+                miss = []
+                if not o_xy:
+                    miss.append(f"출발지('{origin}')")
+                if not d_xy:
+                    miss.append(f"도착지('{dest}')")
+                st.error(f"주소 인식 실패: {', '.join(miss)}. "
+                         f"시·군까지 포함한 전체 주소로 입력해 보세요. "
+                         f"예) 경상북도 안동시 풍천면 도청대로 455")
             else:
-                dist_km = route["distance_m"] / 1000
-                st.session_state["last_dist_km"] = dist_km
-                fuel_cost = calc_fuel_cost(dist_km, eff, oil_price)
-                m1, m2, m3 = st.columns(3)
-                m1.metric("도로 주행거리", f"{dist_km:,.1f} km")
-                m2.metric("예상 소요시간", f"{route['duration_s']//60} 분")
-                m3.metric("유류비(참고)", f"{fuel_cost:,.0f} 원")
-                if route["toll"]:
-                    st.caption(f"통행료 참고: {route['toll']:,} 원")
+                st.success("주소 좌표 변환 성공 ✓")
+                # 2단계: 길찾기
+                route = get_road_distance(o_xy, d_xy)
+                if not route["ok"]:
+                    # 승인 대기 등 사유를 그대로 안내
+                    st.warning(f"도로거리 계산 대기: {route['reason']}")
+                    st.info("주소 인식은 정상입니다. 길찾기 승인 후 이 버튼만 다시 누르면 거리가 나옵니다.")
+                else:
+                    dist_km = route["distance_m"] / 1000
+                    st.session_state["last_dist_km"] = dist_km
+                    fuel_cost = calc_fuel_cost(dist_km, eff, oil_price)
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("도로 주행거리", f"{dist_km:,.1f} km")
+                    m2.metric("예상 소요시간", f"{route['duration_s']//60} 분")
+                    m3.metric("유류비(참고)", f"{fuel_cost:,.0f} 원")
+                    if route["toll"]:
+                        st.caption(f"통행료 참고: {route['toll']:,} 원")
 
     # --- 3층 구조: 여비 항목 (자동값 기본, 수기 수정 가능) ---
     st.markdown("##### 4) 여비 항목 (자동값 기본 · 모두 수정 가능)")
@@ -375,7 +453,7 @@ with tab3:
                     o_xy = geocode(str(r.get("출발지", "")))
                     d_xy = geocode(str(r.get("도착지", "")))
                     route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
-                    dist_km = route["distance_m"] / 1000 if route else None
+                    dist_km = route["distance_m"] / 1000 if (route and route.get("ok")) else None
 
                     eff = None
                     match = fuel_df[(fuel_df["제조사"] == r.get("제조사")) &
