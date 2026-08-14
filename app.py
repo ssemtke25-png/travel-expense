@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-공무원 출장 여비 산정 시스템 (골격 버전 + 지오코딩 진단)
+공무원 출장 여비 산정 시스템 (골격 버전 + 지오코딩 진단 + 관내 자동판정)
 --------------------------------------------------
 구성
   1) 유가 조회 탭      : 오피넷 무료 API (전국/시도/시군)
   2) 여비 계산 탭      : 주소→좌표(카카오 지오코딩) → 도로거리(카카오모빌리티)
                          → 규정 표준 연비/전비 → 유류비(왕복),
                          그 위에 일비·식비·숙박비·통행료 구조
+                         + 관내 자동판정(호명읍 특례 + 12km) — 제안 후 사용자 전환
   3) 일괄 처리 탭      : 출장자 명단 엑셀 업로드 → 전원 계산 → 엑셀 다운로드
 
 설계 원칙
@@ -113,6 +114,42 @@ OPINET_BASE = "https://www.opinet.co.kr/api"
 KAKAO_GEOCODE_URL = "https://dapi.kakao.com/v2/local/search/address.json"
 KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
+
+
+# =============================================================
+# 관내 자동판정 (호명읍 특례 + 12km) — 제안용
+# =============================================================
+DOCHEONG_ADDR = "경상북도 안동시 풍천면 도청대로 455"  # 경상북도청
+
+
+def is_from_docheong(origin: str) -> bool:
+    """출발지가 경북도청인지 대략 판정(핵심어 포함 여부)."""
+    if not origin:
+        return False
+    o = origin.replace(" ", "")
+    return ("도청대로455" in o) or ("경상북도청" in o) or ("풍천면도청대로" in o)
+
+
+def check_gwannae_candidate(origin: str, dest: str, dist_km_oneway):
+    """
+    관내 후보 판정 (자동전환 X, 제안용).
+    기준:
+      1) 출발지=도청 AND 도착지에 '예천군 호명읍' 포함  → 호명읍 특례
+      2) 편도거리 < 12km                                 → 거리 기준
+    반환: (is_candidate: bool, reason: str)
+    """
+    reasons = []
+    dest_c = (dest or "").replace(" ", "")
+    if is_from_docheong(origin):
+        # 도청 소재지(안동시)는 항상 관내
+        if "안동시" in dest_c:
+            reasons.append("도청 출발 + 안동시(도청 소재지, 관내)")
+        # 예천군 호명읍 관내 특례
+        if "예천군호명읍" in dest_c or "호명읍" in dest_c:
+            reasons.append("도청 출발 + 예천군 호명읍(관내 특례)")
+    if dist_km_oneway is not None and dist_km_oneway < ALLOWANCE_RATES["관내_거리기준_km"]:
+        reasons.append(f"편도 {dist_km_oneway:,.1f}km < 12km")
+    return (len(reasons) > 0, " · ".join(reasons))
 
 
 # =============================================================
@@ -246,6 +283,12 @@ def geocode_debug(address: str) -> dict:
 def geocode(address: str):
     result = geocode_debug(address)
     return result["xy"] if result["ok"] else None
+
+
+@st.cache_data(ttl=86400)
+def geocode_full(address: str) -> dict:
+    """일괄처리용: 좌표와 실패사유를 함께 반환(캐시)."""
+    return geocode_debug(address)
 
 
 @st.cache_data(ttl=86400)
@@ -478,7 +521,7 @@ SIGUN_PREFIX = {
     "포항북": "경상북도 포항시",
     "경주": "경상북도 경주시",
     "김천": "경상북도 김천시",
-    "안동": "경상북도 안동시",
+    # 안동은 도청 소재지 → 항상 관내(정액 2만원)이므로 도착지 버튼에서 제외
     "구미": "경상북도 구미시",
     "영주": "경상북도 영주시",
     "영천": "경상북도 영천시",
@@ -531,9 +574,12 @@ with tab2:
     # =========================================================
     # 0) 출장 구분 (최상단) — 관내면 경로·유종·유가 불필요
     # =========================================================
+    # 관내 자동판정에서 '관내로 전환' 버튼을 누르면 force_gwannae 신호가 들어옴 → 기본 '관내' 선택
+    _default_idx = 1 if st.session_state.pop("force_gwannae", False) else 0
     g1, g2 = st.columns(2)
     trip_type = g1.radio(
         "출장 구분", ["근무지 외(관외)", "근무지 내(관내)"],
+        index=_default_idx,
         horizontal=True,
         help="같은 시·군 안 또는 여행거리 12km 미만이면 관내입니다. "
              "관내는 정액이라 경로·유종·유가 입력이 필요 없습니다.",
@@ -713,11 +759,26 @@ with tab2:
                         dist_km_oneway = route["distance_m"] / 1000
                         st.session_state["last_dist_km_oneway"] = dist_km_oneway
                         st.session_state["last_toll_oneway"] = int(route["toll"])
+                        # 관내 판정용으로 이번 경로 정보 저장(전환 후 재렌더에서도 사유 표시 가능)
+                        st.session_state["last_origin"] = origin
+                        st.session_state["last_dest"] = dest
                         m1, m2 = st.columns(2)
                         m1.metric("도로거리(편도)", f"{dist_km_oneway:,.1f} km")
                         m2.metric("통행료(편도)", f"{int(route['toll']):,} 원")
                         st.caption(f"예상 소요시간(편도): {route['duration_s']//60} 분")
                         st.caption("ⓘ 왕복·운임·통행료 최종 금액은 아래 '4) 여비 산정'의 운임 배수 설정에 따라 계산됩니다.")
+
+                        # --- 관내 자동판정 (제안만, 자동전환 X) ---
+                        cand, why = check_gwannae_candidate(origin, dest, dist_km_oneway)
+                        if cand:
+                            st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
+                                       "같은 시·군 안이거나 여행거리 12km 미만이면 관내(정액)로 "
+                                       "처리해야 할 수 있습니다. 아래 버튼으로 전환하거나, 관외로 계속 진행하세요.")
+                            if st.button("→ 관내(정액)로 전환", key="switch_to_gwannae"):
+                                st.session_state["force_gwannae"] = True
+                                st.rerun()
+                        else:
+                            st.caption("ⓘ 관내 특례·12km 기준에 해당하지 않아 관외로 계속 진행합니다.")
 
         # --- 4) 여비 산정 ---
         st.markdown("##### 4) 여비 산정")
@@ -881,10 +942,25 @@ with tab3:
                 results = []
                 prog = st.progress(0.0)
                 for i, r in df_in.iterrows():
-                    o_xy = geocode(str(r.get("출발지", "")))
-                    d_xy = geocode(str(r.get("도착지", "")))
+                    origin_addr = str(r.get("출발지", ""))
+                    dest_addr = str(r.get("도착지", ""))
+                    o_res = geocode_full(origin_addr)
+                    d_res = geocode_full(dest_addr)
+                    o_xy = o_res["xy"] if o_res["ok"] else None
+                    d_xy = d_res["xy"] if d_res["ok"] else None
+
+                    # 실패사유 정리 (지오코딩 단계)
+                    fail_reasons = []
+                    if not o_res["ok"]:
+                        fail_reasons.append(f"출발지[{o_res['method']}]:{o_res['reason']}")
+                    if not d_res["ok"]:
+                        fail_reasons.append(f"도착지[{d_res['method']}]:{d_res['reason']}")
+
                     route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
                     ok = bool(route and route.get("ok"))
+                    if (o_xy and d_xy) and not ok and route is not None:
+                        fail_reasons.append(f"길찾기:{route.get('reason', '알 수 없음')}")
+
                     dist_km_oneway = route["distance_m"] / 1000 if ok else None
                     toll_oneway = int(route["toll"]) if ok else None
 
@@ -903,6 +979,9 @@ with tab3:
                     eff_val = std["eff"] if std else None
                     eff_unit = std["unit"] if std else "-"
 
+                    # 관내 자동판정 (일괄에서도 사유 표기)
+                    cand, why = check_gwannae_candidate(origin_addr, dest_addr, dist_km_oneway)
+
                     results.append({
                         "성명": r.get("성명"),
                         "직급": r.get("직급"),
@@ -915,6 +994,9 @@ with tab3:
                         "적용거리(km)": round(dist_applied, 1) if dist_applied else "조회실패",
                         "통행료(원)": toll_applied if toll_applied is not None else "조회실패",
                         "출장일수": r.get("출장일수"),
+                        "관내후보": "예" if cand else "아니오",
+                        "관내판정사유": why if cand else "",
+                        "실패사유": " / ".join(fail_reasons) if fail_reasons else "",
                     })
                     prog.progress((i + 1) / len(df_in))
                     time.sleep(0.05)
@@ -922,6 +1004,16 @@ with tab3:
                 res_df = pd.DataFrame(results)
                 st.success("계산 완료")
                 st.dataframe(res_df, width="stretch")
+
+                # 실패 행 요약
+                fail_cnt = int((res_df["실패사유"] != "").sum())
+                if fail_cnt > 0:
+                    st.warning(f"⚠️ 조회 실패 {fail_cnt}건 — '실패사유' 열에서 원인을 확인하세요. "
+                               "(주소 형식 문제면 시·군 포함 전체주소로 수정, 401/403이면 카카오 앱 설정)")
+                cand_cnt = int((res_df["관내후보"] == "예").sum())
+                if cand_cnt > 0:
+                    st.info(f"🏠 관내 출장 후보 {cand_cnt}건 — '관내판정사유' 열을 확인하세요. "
+                            "(호명읍 특례 또는 편도 12km 미만)")
 
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as w:
