@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-공무원 출장 여비 산정 시스템 (골격 버전)
+공무원 출장 여비 산정 시스템 (골격 버전 + 지오코딩 진단)
 --------------------------------------------------
 구성
   1) 유가 조회 탭      : 오피넷 무료 API (전국/시도/시군)
@@ -14,7 +14,7 @@
   - 여비 조례 단가/출력 양식은 사무실 실물 자료 확보 후 채울 자리만 확보.
   - 관용차 계산법은 추후 추가 (fuel_type 분기 자리 확보).
 
-API 키는 .streamlit/secrets.toml 에서 로드.
+API 키는 .streamlit/secrets.toml (또는 Streamlit Cloud Secrets)에서 로드.
 """
 
 import io
@@ -65,6 +65,7 @@ OPINET_SIDO = {
 
 OPINET_BASE = "https://www.opinet.co.kr/api"
 KAKAO_GEOCODE_URL = "https://dapi.kakao.com/v2/local/search/address.json"
+KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
 
 
@@ -162,22 +163,71 @@ def fetch_oil_price_sigun(sido_code: str, product_code: str) -> pd.DataFrame:
 # =============================================================
 # 카카오 지오코딩 + 길찾기
 # =============================================================
-@st.cache_data(ttl=86400)
-def geocode(address: str):
-    """주소 → (경도 x, 위도 y). 지번/도로명 모두 지원. 권한 신청 불필요."""
+def geocode_debug(address: str) -> dict:
+    """
+    주소 → 좌표 + 실패 사유.
+    반환: {'ok': bool, 'xy': (x,y)|None, 'reason': str, 'method': str}
+
+    1차: 주소 검색 API(address.json)
+    2차: 1차 실패 시 키워드 검색 API(keyword.json)로 폴백
+         (도로명 상세가 정확히 안 맞거나 건물명/약식 주소일 때 대응)
+    """
     if not KAKAO_REST_KEY:
-        return None
+        return {"ok": False, "xy": None, "method": "-",
+                "reason": "카카오 REST 키가 secrets에 설정되지 않았습니다."}
+    if not address or not address.strip():
+        return {"ok": False, "xy": None, "method": "-", "reason": "주소가 비어 있습니다."}
+
+    addr = address.strip()
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
-    params = {"query": address}
+
+    # --- 1차: 주소 검색 ---
     try:
-        r = requests.get(KAKAO_GEOCODE_URL, headers=headers, params=params, timeout=10)
+        r = requests.get(KAKAO_GEOCODE_URL, headers=headers,
+                         params={"query": addr}, timeout=10)
+        if r.status_code == 401:
+            return {"ok": False, "xy": None, "method": "address",
+                    "reason": "401 인증 실패 — REST 키가 틀렸거나 카카오 앱에 등록된 키가 아닙니다."}
+        if r.status_code == 403:
+            return {"ok": False, "xy": None, "method": "address",
+                    "reason": "403 권한 거부 — 카카오 앱에서 '카카오맵/로컬(주소검색)' 사용이 꺼져 있거나 "
+                              "플랫폼(도메인/IP) 제한에 걸렸습니다."}
         r.raise_for_status()
         docs = r.json().get("documents", [])
-        if not docs:
-            return None
-        return float(docs[0]["x"]), float(docs[0]["y"])
-    except Exception:
-        return None
+        if docs:
+            return {"ok": True,
+                    "xy": (float(docs[0]["x"]), float(docs[0]["y"])),
+                    "method": "address", "reason": "성공(주소검색)"}
+    except Exception as e:
+        return {"ok": False, "xy": None, "method": "address",
+                "reason": f"주소검색 호출 예외: {type(e).__name__}: {e}"}
+
+    # --- 2차: 키워드 검색 폴백 ---
+    try:
+        r2 = requests.get(KAKAO_KEYWORD_URL, headers=headers,
+                          params={"query": addr}, timeout=10)
+        if r2.status_code in (401, 403):
+            return {"ok": False, "xy": None, "method": "keyword",
+                    "reason": f"{r2.status_code} — 키워드 검색 권한 문제. 카카오 앱 로컬 API 설정 확인 필요."}
+        r2.raise_for_status()
+        docs2 = r2.json().get("documents", [])
+        if docs2:
+            return {"ok": True,
+                    "xy": (float(docs2[0]["x"]), float(docs2[0]["y"])),
+                    "method": "keyword", "reason": "성공(키워드검색 폴백)"}
+    except Exception as e:
+        return {"ok": False, "xy": None, "method": "keyword",
+                "reason": f"키워드검색 호출 예외: {type(e).__name__}: {e}"}
+
+    return {"ok": False, "xy": None, "method": "both",
+            "reason": f"주소·키워드 모두 검색결과 0건: '{addr}'. 시·군 포함 전체 주소로 다시 입력해 보세요."}
+
+
+@st.cache_data(ttl=86400)
+def geocode(address: str):
+    """주소 → (경도 x, 위도 y). 실패 시 None. (일괄 처리용 간단 래퍼)"""
+    result = geocode_debug(address)
+    return result["xy"] if result["ok"] else None
 
 
 @st.cache_data(ttl=86400)
@@ -246,12 +296,25 @@ st.title("🚗 공무원 출장 여비 산정 시스템")
 st.caption("골격 버전 · 저장 기능 없음(세션 유지) · 여비 조례/출력양식은 실물 자료 확보 후 반영")
 
 # API 키 상태 표시
-with st.expander("🔑 API 연결 상태 확인", expanded=False):
+with st.expander("🔑 API 연결 상태 확인 / 지오코딩 진단", expanded=False):
     c1, c2, c3 = st.columns(3)
     c1.metric("오피넷 유가", "연결됨" if OPINET_KEY else "미설정")
     c2.metric("카카오 지오코딩", "연결됨" if KAKAO_REST_KEY else "미설정")
     c3.metric("카카오 길찾기", "키 있음(승인 확인 필요)" if KAKAO_REST_KEY else "미설정")
     st.info("길찾기 API는 카카오 데브톡 사용 권한 승인 후 정상 작동합니다.")
+
+    st.markdown("---")
+    st.markdown("**🔍 지오코딩 단독 테스트** — 주소 하나만 넣어 실패 사유를 바로 확인")
+    test_addr = st.text_input("테스트 주소", value="경상북도 안동시 풍천면 도청대로 455",
+                              key="geocode_test_addr")
+    if st.button("주소 → 좌표 변환 테스트", key="geocode_test_btn"):
+        res = geocode_debug(test_addr)
+        if res["ok"]:
+            st.success(f"성공 [{res['method']}] → x={res['xy'][0]}, y={res['xy'][1]}")
+        else:
+            st.error(f"실패 [{res['method']}] → {res['reason']}")
+        st.caption("여기서 뜨는 메시지가 실제 원인입니다. "
+                   "401/403이면 카카오 앱 설정, 0건이면 주소 형식, 미설정이면 Secrets 문제입니다.")
 
 tab1, tab2, tab3 = st.tabs(["⛽ 유가 조회", "🧮 여비 계산", "📋 명단 일괄 처리"])
 
@@ -265,25 +328,26 @@ with tab1:
     if view == "전국 평균":
         df = fetch_oil_price_nationwide()
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
         else:
             st.info("오피넷 API 키를 secrets에 설정하면 조회됩니다.")
 
     elif view == "시도별":
         df = fetch_oil_price_sido()
         if not df.empty:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
         else:
             st.info("오피넷 API 키를 secrets에 설정하면 조회됩니다.")
 
     else:  # 시군별
         cc1, cc2 = st.columns(2)
-        sido_name = cc1.selectbox("시도", list(OPINET_SIDO.keys()), index=list(OPINET_SIDO.keys()).index("경북"))
+        sido_name = cc1.selectbox("시도", list(OPINET_SIDO.keys()),
+                                  index=list(OPINET_SIDO.keys()).index("경북"))
         prod_name = cc2.selectbox("유종", list(OPINET_PRODUCTS.keys()))
         if st.button("시군별 조회"):
             df = fetch_oil_price_sigun(OPINET_SIDO[sido_name], OPINET_PRODUCTS[prod_name])
             if not df.empty:
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, width="stretch")
             else:
                 st.info("결과가 없거나 API 키가 설정되지 않았습니다.")
 
@@ -368,20 +432,19 @@ with tab2:
         if not origin or not dest:
             st.error("출발지와 도착지 주소를 모두 입력하세요.")
         else:
-            o_xy = geocode(origin)
-            d_xy = geocode(dest)
-            # 1단계: 지오코딩 실패 구분
-            if not o_xy or not d_xy:
-                miss = []
-                if not o_xy:
-                    miss.append(f"출발지('{origin}')")
-                if not d_xy:
-                    miss.append(f"도착지('{dest}')")
-                st.error(f"주소 인식 실패: {', '.join(miss)}. "
-                         f"시·군까지 포함한 전체 주소로 입력해 보세요. "
-                         f"예) 경상북도 안동시 풍천면 도청대로 455")
+            o = geocode_debug(origin)
+            d = geocode_debug(dest)
+            # 1단계: 지오코딩 실패 시 구체적 사유 표시
+            if not o["ok"] or not d["ok"]:
+                if not o["ok"]:
+                    st.error(f"출발지 실패 [{o['method']}] → {o['reason']}")
+                if not d["ok"]:
+                    st.error(f"도착지 실패 [{d['method']}] → {d['reason']}")
+                st.caption("↑ 위 상단 '🔑 API 연결 상태 확인 / 지오코딩 진단' 을 펼쳐 "
+                           "단독 테스트로 원인을 좁힐 수 있습니다.")
             else:
-                st.success("주소 좌표 변환 성공 ✓")
+                o_xy, d_xy = o["xy"], d["xy"]
+                st.success(f"주소 좌표 변환 성공 ✓ (출발지:{o['method']} / 도착지:{d['method']})")
                 # 2단계: 길찾기
                 route = get_road_distance(o_xy, d_xy)
                 if not route["ok"]:
@@ -443,7 +506,7 @@ with tab3:
         try:
             df_in = pd.read_excel(up)
             st.write("업로드된 명단:")
-            st.dataframe(df_in, use_container_width=True)
+            st.dataframe(df_in, width="stretch")
 
             if st.button("전원 계산 실행", type="primary"):
                 fuel_df = load_fuel_efficiency()
@@ -455,11 +518,11 @@ with tab3:
                     route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
                     dist_km = route["distance_m"] / 1000 if (route and route.get("ok")) else None
 
-                    eff = None
+                    eff_val = None
                     match = fuel_df[(fuel_df["제조사"] == r.get("제조사")) &
                                     (fuel_df["모델명"] == r.get("모델명"))]
                     if not match.empty:
-                        eff = float(match.iloc[0]["복합연비"])
+                        eff_val = float(match.iloc[0]["복합연비"])
 
                     results.append({
                         "성명": r.get("성명"),
@@ -467,7 +530,7 @@ with tab3:
                         "출발지": r.get("출발지"),
                         "도착지": r.get("도착지"),
                         "도로거리(km)": round(dist_km, 1) if dist_km else "조회실패",
-                        "연비(km/L)": eff if eff else "미등록",
+                        "연비(km/L)": eff_val if eff_val else "미등록",
                         "출장일수": r.get("출장일수"),
                     })
                     prog.progress((i + 1) / len(df_in))
@@ -475,7 +538,7 @@ with tab3:
 
                 res_df = pd.DataFrame(results)
                 st.success("계산 완료")
-                st.dataframe(res_df, use_container_width=True)
+                st.dataframe(res_df, width="stretch")
 
                 # 결과 엑셀 다운로드
                 out = io.BytesIO()
