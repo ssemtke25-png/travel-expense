@@ -38,12 +38,32 @@ def _get_secret(key: str) -> str:
 OPINET_KEY = _get_secret("OPINET_KEY")          # 오피넷 무료 API 키
 KAKAO_REST_KEY = _get_secret("KAKAO_REST_KEY")  # 카카오 REST API 키 (지오코딩+길찾기 공용)
 
-# ---- 여비 조례 단가 (자리만 확보. 사무실 조례 별표로 교체) ----
-# TODO: 경상북도 공무원 여비 조례·규칙 별표 값으로 채울 것
+# ---- 여비 단가 ----
+# 근거: 「공무원 여비 규정」(대통령령) 별표2 및 제18조.
+# 지방공무원은 제29조의2에 따라 "해당 지방자치단체 여비 조례"가 우선 적용됨.
+#   → 대부분 지자체가 국가 별표2 금액을 그대로 준용하나,
+#     아래 값은 반드시 경상북도 여비 조례 별표로 최종 확인해 교체할 것.
+# 아래는 국가 규정 기준 기본값(교체 전 임시값).
 ALLOWANCE_RATES = {
-    "일비_1일": 0,      # 예) 25000
-    "식비_1일": 0,      # 예) 25000
-    "숙박비_상한_1박": 0,  # 실비 정산, 상한만. 예) 지역별 상이
+    "일비_1일": 25000,          # 별표2: 1일 25,000원
+    "식비_1일": 25000,          # 별표2: 1일 25,000원 (국내는 정액)
+    # 숙박비 상한은 지역별 상이(실비 정산, 상한 이내)
+    "숙박비_상한_서울": 100000,
+    "숙박비_상한_광역시": 80000,
+    "숙박비_상한_그밖": 70000,
+    # 근무지 내(관내) 국내출장 정액 — 제18조
+    "관내_4시간이상": 20000,     # 4시간 이상 2만원
+    "관내_4시간미만": 10000,     # 4시간 미만 1만원
+    "관내_공무용차량감액": 10000,  # 공무용 차량 이용 시 1만원 감액
+    # 관내 출장 판정 거리 기준(km) — 제18조 제2항 제2호
+    "관내_거리기준_km": 12.0,
+}
+
+# 숙박비 상한 지역 구분 라벨 → 상수 키 매핑
+SUKBAK_REGION = {
+    "서울특별시": "숙박비_상한_서울",
+    "광역시": "숙박비_상한_광역시",
+    "그 밖의 지역": "숙박비_상한_그밖",
 }
 
 # ---- 오피넷 유종 코드 ----
@@ -276,17 +296,67 @@ def calc_fuel_cost(distance_km: float, efficiency: float, oil_price: float) -> f
     return (distance_km / efficiency) * oil_price
 
 
-def calculate_travel_allowance(**kwargs) -> dict:
+def calculate_travel_allowance(
+    *,
+    is_gwannae: bool,          # 관내(근무지 내) 출장 여부
+    hours_over_4: bool,        # (관내) 4시간 이상 여부
+    use_official_car: bool,    # 공무용 차량 이용 여부
+    days: int,                 # 출장일수(관외 일비·식비 계산용)
+    nights: int,               # 숙박 밤 수
+    sukbak_region_key: str,    # 숙박비 상한 지역 키
+    fuel_cost: float,          # 유류비(참고/관용차 실비). 운임 대체로 사용 가능
+    manual_transport: float,   # 운임(대중교통 등) 수기 입력값
+) -> dict:
     """
-    여비 최종 산출 (자리만 확보).
-    TODO: 경북 여비 조례 로직 반영.
-      - 근무지 내/외 구분(4시간 기준)
-      - 일비·식비 = 일수 × 단가
-      - 숙박비 = 실비(상한 이내)
-      - 관용차 이용 시 유류비 처리 분기
-    현재는 유류비만 반환하는 골격.
+    「공무원 여비 규정」 준용 여비 산출.
+
+    - 관내(근무지 내, 제18조): 정액 지급.
+        4시간 이상 20,000 / 미만 10,000, 공무용 차량 이용 시 10,000 감액.
+        (일비·식비·숙박비 별도 지급 없음)
+    - 관외(근무지 외, 별표2): 운임 + 일비 + 식비 + 숙박비 합산.
+        일비 = 일수 × 단가 (공무용 차량 이용 시 1/2)
+        식비 = 일수 × 단가
+        숙박비 = 밤 수 × 지역별 상한(실비, 상한 이내)
+        운임 = 대중교통 수기입력, 자가차면 유류비를 운임 자리에 사용
+
+    반환: 각 항목 금액과 합계 딕셔너리
     """
-    return {}
+    result = {}
+
+    if is_gwannae:
+        base = (ALLOWANCE_RATES["관내_4시간이상"] if hours_over_4
+                else ALLOWANCE_RATES["관내_4시간미만"])
+        if use_official_car:
+            base = max(0, base - ALLOWANCE_RATES["관내_공무용차량감액"])
+        result["구분"] = "근무지 내(관내)"
+        result["관내정액"] = base
+        result["합계"] = base
+        return result
+
+    # --- 관외 ---
+    ilbi_unit = ALLOWANCE_RATES["일비_1일"]
+    ilbi = ilbi_unit * days
+    if use_official_car:
+        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2 (제16조 제3항)
+
+    sikbi = ALLOWANCE_RATES["식비_1일"] * days
+
+    sukbak_cap = ALLOWANCE_RATES.get(sukbak_region_key, ALLOWANCE_RATES["숙박비_상한_그밖"])
+    sukbak = sukbak_cap * max(0, nights)
+
+    # 운임: 자가차면 유류비, 대중교통이면 수기입력. 둘 다 있으면 합산하지 않고 큰 쪽 안내.
+    transport = manual_transport if manual_transport > 0 else fuel_cost
+
+    total = int(round(ilbi + sikbi + sukbak + transport))
+    result.update({
+        "구분": "근무지 외(관외)",
+        "운임": int(round(transport)),
+        "일비": int(ilbi),
+        "식비": int(sikbi),
+        "숙박비": int(sukbak),
+        "합계": total,
+    })
+    return result
 
 
 # =============================================================
@@ -462,17 +532,85 @@ with tab2:
                     if route["toll"]:
                         st.caption(f"통행료 참고: {route['toll']:,} 원")
 
-    # --- 3층 구조: 여비 항목 (자동값 기본, 수기 수정 가능) ---
-    st.markdown("##### 4) 여비 항목 (자동값 기본 · 모두 수정 가능)")
-    st.caption("조례 단가는 사무실 자료 확보 후 자동 채움. 현재는 수기 입력 상태.")
-    d1, d2, d3, d4 = st.columns(4)
-    days = d1.number_input("출장일수", min_value=0, value=1, step=1)
-    ilbi = d2.number_input("일비(원)", min_value=0, value=ALLOWANCE_RATES["일비_1일"] * 1, step=1000)
-    sikbi = d3.number_input("식비(원)", min_value=0, value=ALLOWANCE_RATES["식비_1일"] * 1, step=1000)
-    sukbak = d4.number_input("숙박비(실비, 원)", min_value=0, value=0, step=1000)
+    # --- 여비 항목 (관내/관외 분기) ---
+    st.markdown("##### 4) 여비 산정")
+    st.caption("「공무원 여비 규정」 준용. 단가는 상단 ALLOWANCE_RATES 기본값(국가 규정)이며, "
+               "경상북도 여비 조례 값으로 최종 확인·교체하세요.")
 
-    st.info("여비 최종 합산·조례 반영·엑셀 출력양식은 실물 자료 확보 후 연결됩니다. "
-            "현재는 각 항목이 독립적으로 수정 가능한 상태입니다.")
+    # 관내/관외 자동 추천 (거리 기준). 계산된 거리가 있으면 참고로 안내.
+    last_km = st.session_state.get("last_dist_km")
+    auto_gwannae = None
+    if last_km is not None:
+        auto_gwannae = last_km < ALLOWANCE_RATES["관내_거리기준_km"]
+        hint = (f"이번 경로 {last_km:,.1f}km → "
+                f"{'관내(12km 미만)' if auto_gwannae else '관외(12km 이상)'} 추정")
+        st.caption(f"ⓘ {hint}. 같은 시·군이면 거리와 무관하게 관내입니다. 아래에서 직접 선택하세요.")
+
+    g1, g2 = st.columns(2)
+    trip_type = g1.radio(
+        "출장 구분",
+        ["근무지 외(관외)", "근무지 내(관내)"],
+        index=(1 if auto_gwannae else 0),
+        horizontal=True,
+        help="같은 시·군 안 또는 여행거리 12km 미만이면 관내입니다.",
+    )
+    use_car = g2.checkbox("공무용 차량 이용",
+                          help="관내: 1만원 감액 / 관외: 일비 1/2 지급")
+
+    is_gwannae = (trip_type == "근무지 내(관내)")
+
+    if is_gwannae:
+        hours_over_4 = st.radio("출장 시간", ["4시간 이상", "4시간 미만"],
+                                horizontal=True) == "4시간 이상"
+        days = 0
+        nights = 0
+        sukbak_region_key = "숙박비_상한_그밖"
+        manual_transport = 0.0
+    else:
+        hours_over_4 = True
+        e1, e2, e3 = st.columns(3)
+        days = e1.number_input("출장일수(일비·식비)", min_value=0, value=1, step=1)
+        nights = e2.number_input("숙박 밤 수", min_value=0, value=0, step=1)
+        sukbak_region_label = e3.selectbox(
+            "숙박지역(상한)", list(SUKBAK_REGION.keys()),
+            index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
+        sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
+
+        manual_transport = st.number_input(
+            "운임(대중교통 등, 원) — 비우면 위 유류비 사용", min_value=0, value=0, step=1000,
+            help="자가차 출장이면 비워두세요(위에서 계산된 유류비가 운임 자리에 들어갑니다). "
+                 "KTX·버스 등 대중교통이면 실비를 입력하세요.")
+
+    # 유류비: 직전 계산 결과가 있으면 재계산해서 사용
+    fuel_cost_val = 0.0
+    if last_km is not None:
+        fuel_cost_val = calc_fuel_cost(last_km, eff, oil_price)
+
+    if st.button("여비 합계 계산", type="primary", key="calc_allowance"):
+        res = calculate_travel_allowance(
+            is_gwannae=is_gwannae,
+            hours_over_4=hours_over_4,
+            use_official_car=use_car,
+            days=int(days),
+            nights=int(nights),
+            sukbak_region_key=sukbak_region_key,
+            fuel_cost=fuel_cost_val,
+            manual_transport=float(manual_transport),
+        )
+        st.markdown(f"**구분: {res['구분']}**")
+        if is_gwannae:
+            st.metric("관내 정액 여비", f"{res['관내정액']:,} 원")
+        else:
+            cc = st.columns(4)
+            cc[0].metric("운임", f"{res['운임']:,} 원")
+            cc[1].metric("일비", f"{res['일비']:,} 원")
+            cc[2].metric("식비", f"{res['식비']:,} 원")
+            cc[3].metric("숙박비", f"{res['숙박비']:,} 원")
+        st.success(f"여비 합계: {res['합계']:,} 원")
+        st.caption("※ 단가·관내 판정·차량 감액은 경상북도 여비 조례로 최종 확인하세요. "
+                   "숙박비는 실비 정산(상한 이내)이 원칙입니다.")
+
+    st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다.")
 
 # -------------------------------------------------------------
 # TAB 3 : 명단 일괄 처리
