@@ -5,7 +5,7 @@
 구성
   1) 유가 조회 탭      : 오피넷 무료 API (전국/시도/시군)
   2) 여비 계산 탭      : 주소→좌표(카카오 지오코딩) → 도로거리(카카오모빌리티)
-                         → 연비 → 유류비, 그 위에 일비·식비·숙박비 3층 구조
+                         → 연비 → 유류비, 그 위에 일비·식비·숙박비·통행료 구조
   3) 일괄 처리 탭      : 출장자 명단 엑셀 업로드 → 전원 계산 → 엑셀 다운로드
 
 설계 원칙
@@ -253,10 +253,13 @@ def geocode(address: str):
 @st.cache_data(ttl=86400)
 def get_road_distance(origin_xy, dest_xy):
     """
-    좌표 → 도로 주행거리(m), 소요시간(s).
+    좌표 → 도로 주행거리(m), 소요시간(s), 통행료(원, 편도).
     카카오모빌리티 자동차 길찾기 API. ★사용 권한 승인 필요★
     반환: {"ok": True, ...} 또는 {"ok": False, "reason": "..."}
     실패 사유를 구분해 UI에서 안내를 다르게 보여준다.
+
+    통행료(toll): summary.fare.toll — 이 API가 계산한 경로의 편도 통행료.
+                  fare 안에는 toll(통행료) 외 taxi(택시 예상요금)도 오므로 toll만 사용.
     """
     if not KAKAO_REST_KEY:
         return {"ok": False, "reason": "카카오 키가 설정되지 않았습니다."}
@@ -280,7 +283,7 @@ def get_road_distance(origin_xy, dest_xy):
             "ok": True,
             "distance_m": summary["distance"],
             "duration_s": summary["duration"],
-            "toll": summary.get("fare", {}).get("toll", 0),
+            "toll": summary.get("fare", {}).get("toll", 0),  # 편도 통행료
         }
     except Exception as e:
         return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
@@ -306,6 +309,7 @@ def calculate_travel_allowance(
     sukbak_region_key: str,    # 숙박비 상한 지역 키
     fuel_cost: float,          # 유류비(참고/관용차 실비). 운임 대체로 사용 가능
     manual_transport: float,   # 운임(대중교통 등) 수기 입력값
+    toll: float = 0.0,         # 통행료(왕복, 수기 수정 반영된 최종값) — 별도 항목
 ) -> dict:
     """
     「공무원 여비 규정」 준용 여비 산출.
@@ -313,11 +317,12 @@ def calculate_travel_allowance(
     - 관내(근무지 내, 제18조): 정액 지급.
         4시간 이상 20,000 / 미만 10,000, 공무용 차량 이용 시 10,000 감액.
         (일비·식비·숙박비 별도 지급 없음)
-    - 관외(근무지 외, 별표2): 운임 + 일비 + 식비 + 숙박비 합산.
+    - 관외(근무지 외, 별표2): 운임 + 일비 + 식비 + 숙박비 + 통행료 합산.
         일비 = 일수 × 단가 (공무용 차량 이용 시 1/2)
         식비 = 일수 × 단가
         숙박비 = 밤 수 × 지역별 상한(실비, 상한 이내)
         운임 = 대중교통 수기입력, 자가차면 유류비를 운임 자리에 사용
+        통행료 = 왕복 기본값(편도×2)을 사용자가 수기 수정 (국도 이용 시 0)
 
     반환: 각 항목 금액과 합계 딕셔너리
     """
@@ -347,13 +352,17 @@ def calculate_travel_allowance(
     # 운임: 자가차면 유류비, 대중교통이면 수기입력. 둘 다 있으면 합산하지 않고 큰 쪽 안내.
     transport = manual_transport if manual_transport > 0 else fuel_cost
 
-    total = int(round(ilbi + sikbi + sukbak + transport))
+    # 통행료: 별도 항목으로 합산 (운임에 섞지 않음)
+    toll_val = max(0, int(round(toll)))
+
+    total = int(round(ilbi + sikbi + sukbak + transport + toll_val))
     result.update({
         "구분": "근무지 외(관외)",
         "운임": int(round(transport)),
         "일비": int(ilbi),
         "식비": int(sikbi),
         "숙박비": int(sukbak),
+        "통행료": toll_val,
         "합계": total,
     })
     return result
@@ -524,13 +533,17 @@ with tab2:
                 else:
                     dist_km = route["distance_m"] / 1000
                     st.session_state["last_dist_km"] = dist_km
+                    # 편도 통행료 → 왕복 기본값 저장 (아래 여비 산정에서 기본값으로 사용)
+                    st.session_state["last_toll_oneway"] = int(route["toll"])
+                    st.session_state["last_toll_roundtrip"] = int(route["toll"]) * 2
                     fuel_cost = calc_fuel_cost(dist_km, eff, oil_price)
                     m1, m2, m3 = st.columns(3)
                     m1.metric("도로 주행거리", f"{dist_km:,.1f} km")
                     m2.metric("예상 소요시간", f"{route['duration_s']//60} 분")
                     m3.metric("유류비(참고)", f"{fuel_cost:,.0f} 원")
                     if route["toll"]:
-                        st.caption(f"통행료 참고: {route['toll']:,} 원")
+                        st.caption(f"통행료(편도): {route['toll']:,} 원 · 왕복 기본값 {route['toll']*2:,} 원 "
+                                   "(아래 여비 산정 통행료 칸에 자동 반영, 수정 가능)")
 
     # --- 여비 항목 (관내/관외 분기) ---
     st.markdown("##### 4) 여비 산정")
@@ -566,6 +579,7 @@ with tab2:
         nights = 0
         sukbak_region_key = "숙박비_상한_그밖"
         manual_transport = 0.0
+        toll_input = 0.0
     else:
         hours_over_4 = True
         e1, e2, e3 = st.columns(3)
@@ -576,10 +590,21 @@ with tab2:
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
 
-        manual_transport = st.number_input(
+        f1, f2 = st.columns(2)
+        manual_transport = f1.number_input(
             "운임(대중교통 등, 원) — 비우면 위 유류비 사용", min_value=0, value=0, step=1000,
             help="자가차 출장이면 비워두세요(위에서 계산된 유류비가 운임 자리에 들어갑니다). "
                  "KTX·버스 등 대중교통이면 실비를 입력하세요.")
+
+        # 통행료: 카카오 왕복 기본값(편도×2)을 채우되 수기 수정 가능. 국도 이용이면 0으로.
+        default_toll = int(st.session_state.get("last_toll_roundtrip", 0))
+        toll_input = f2.number_input(
+            "통행료(왕복, 원)", min_value=0, value=default_toll, step=100,
+            help="카카오 경로 통행료의 왕복 기본값(편도×2)이 자동 입력됩니다. "
+                 "국도 이용·하이패스 할인 등으로 다르면 직접 수정(국도면 0).")
+        if default_toll > 0:
+            st.caption(f"ⓘ 통행료 왕복 기본값 {default_toll:,} 원 자동 반영됨 "
+                       f"(편도 {st.session_state.get('last_toll_oneway', 0):,} 원 × 2). 필요 시 수정.")
 
     # 유류비: 직전 계산 결과가 있으면 재계산해서 사용
     fuel_cost_val = 0.0
@@ -596,19 +621,21 @@ with tab2:
             sukbak_region_key=sukbak_region_key,
             fuel_cost=fuel_cost_val,
             manual_transport=float(manual_transport),
+            toll=float(toll_input),
         )
         st.markdown(f"**구분: {res['구분']}**")
         if is_gwannae:
             st.metric("관내 정액 여비", f"{res['관내정액']:,} 원")
         else:
-            cc = st.columns(4)
+            cc = st.columns(5)
             cc[0].metric("운임", f"{res['운임']:,} 원")
             cc[1].metric("일비", f"{res['일비']:,} 원")
             cc[2].metric("식비", f"{res['식비']:,} 원")
             cc[3].metric("숙박비", f"{res['숙박비']:,} 원")
+            cc[4].metric("통행료", f"{res['통행료']:,} 원")
         st.success(f"여비 합계: {res['합계']:,} 원")
         st.caption("※ 단가·관내 판정·차량 감액은 경상북도 여비 조례로 최종 확인하세요. "
-                   "숙박비는 실비 정산(상한 이내)이 원칙입니다.")
+                   "숙박비는 실비 정산(상한 이내), 통행료는 실비가 원칙입니다.")
 
     st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다.")
 
@@ -655,6 +682,7 @@ with tab3:
                     d_xy = geocode(str(r.get("도착지", "")))
                     route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
                     dist_km = route["distance_m"] / 1000 if (route and route.get("ok")) else None
+                    toll_oneway = int(route["toll"]) if (route and route.get("ok")) else None
 
                     eff_val = None
                     match = fuel_df[(fuel_df["제조사"] == r.get("제조사")) &
@@ -668,6 +696,7 @@ with tab3:
                         "출발지": r.get("출발지"),
                         "도착지": r.get("도착지"),
                         "도로거리(km)": round(dist_km, 1) if dist_km else "조회실패",
+                        "통행료(왕복,원)": toll_oneway * 2 if toll_oneway is not None else "조회실패",
                         "연비(km/L)": eff_val if eff_val else "미등록",
                         "출장일수": r.get("출장일수"),
                     })
