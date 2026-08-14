@@ -280,6 +280,14 @@ def get_road_distance(origin_xy, dest_xy):
 # =============================================================
 # 계산 로직
 # =============================================================
+def floor10(value) -> int:
+    """십원 미만 버림(일의 자리 절사). 예: 1,863 → 1,860, 25,000 → 25,000."""
+    try:
+        return (int(value) // 10) * 10
+    except (TypeError, ValueError):
+        return 0
+
+
 def calc_fuel_cost(distance_km: float, efficiency: float, unit_price: float) -> float:
     """운행비 = 거리 ÷ 연비(전비) × 단가. distance_km 에는 최종 주행거리를 넣는다."""
     if efficiency <= 0:
@@ -318,6 +326,7 @@ def calculate_travel_allowance(
                 else ALLOWANCE_RATES["관내_4시간미만"])
         if use_official_car:
             base = max(0, base - ALLOWANCE_RATES["관내_공무용차량감액"])
+        base = floor10(base)
         result["구분"] = "근무지 내(관내)"
         result["관내정액"] = base
         result["합계"] = base
@@ -327,34 +336,46 @@ def calculate_travel_allowance(
     ilbi_unit = ALLOWANCE_RATES["일비_1일"]
     ilbi = ilbi_unit * days
     if use_official_car:
-        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2
+        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2 (제16조 제3항)
 
     sikbi = ALLOWANCE_RATES["식비_1일"] * days
 
     sukbak_cap = ALLOWANCE_RATES.get(sukbak_region_key, ALLOWANCE_RATES["숙박비_상한_그밖"])
     sukbak = sukbak_cap * max(0, nights)
 
-    # 운임: 자가차면 유류/전기비(왕복 배수 반영된 값), 대중교통이면 수기입력.
-    transport = manual_transport if manual_transport > 0 else fuel_cost
-    transport = int(round(transport))
-    toll_val = max(0, int(round(toll)))
+    # 운임: 공무용 차량이면 운임 미지급(제15조) → 0.
+    #       자가차면 유류/전기비(배수 반영), 대중교통이면 수기입력.
+    if use_official_car:
+        transport = 0
+        toll_val = 0            # 관용차는 통행료도 기관 부담 → 개인 여비 0
+    else:
+        transport = manual_transport if manual_transport > 0 else fuel_cost
+        transport = int(round(transport))
+        toll_val = max(0, int(round(toll)))
+
+    # 각 항목 십원 미만 버림
+    ilbi = floor10(ilbi)
+    sikbi = floor10(sikbi)
+    sukbak = floor10(sukbak)
+    transport = floor10(transport)
+    toll_val = floor10(toll_val)
 
     # 운전자 1인
     driver = {
         "운임": transport,
-        "일비": int(ilbi),
-        "식비": int(sikbi),
-        "숙박비": int(sukbak),
+        "일비": ilbi,
+        "식비": sikbi,
+        "숙박비": sukbak,
         "통행료": toll_val,
     }
     driver["합계"] = sum(driver.values())
 
-    # 동승자 1인 단가 (운임·통행료 없음)
+    # 동승자 1인 단가 (운임·통행료 없음 — 같은 차 탑승)
     pax_unit = {
         "운임": 0,
-        "일비": int(ilbi),
-        "식비": int(sikbi),
-        "숙박비": int(sukbak),
+        "일비": ilbi,
+        "식비": sikbi,
+        "숙박비": sukbak,
         "통행료": 0,
     }
     pax_unit["합계"] = sum(pax_unit.values())
@@ -637,8 +658,12 @@ with tab2:
         help="같은 시·군 안 또는 여행거리 12km 미만이면 관내입니다.",
     )
     use_car = g2.checkbox("공무용 차량 이용",
-                          help="관내: 1만원 감액 / 관외: 일비 1/2 지급")
+                          help="관외: 운임·통행료 0(제15조) + 일비 1/2(제16조③) / "
+                               "관내: 1만원 감액(제18조①)")
     is_gwannae = (trip_type == "근무지 내(관내)")
+    if use_car:
+        st.caption("🚙 공무용 차량 이용 체크됨 → 관외: **운임·통행료 미지급**, 일비 1/2 자동 적용 · "
+                   "관내: 정액 1만원 감액. (기름값·통행료는 기관 부담)")
 
     # --- 운임 배수 (핵심) ---
     st.markdown("**운임 배수 (왕복 처리)**")
@@ -694,12 +719,18 @@ with tab2:
         f1, f2 = st.columns(2)
         manual_transport = f1.number_input(
             "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
+            disabled=use_car,
             help="자가차 출장이면 비워두세요(편도×배수 유류/전기비가 운임으로 들어갑니다). "
-                 "KTX·버스 등 대중교통이면 실비를 입력하세요.")
+                 "KTX·버스 등 대중교통이면 실비를 입력하세요. "
+                 "공무용 차량이면 운임은 0으로 처리되어 입력이 비활성화됩니다.")
         toll_input = f2.number_input(
             "통행료(원)", min_value=0, value=int(applied_toll_default), step=100,
-            help="카카오 편도 통행료 × 배수 값이 자동 입력됩니다. 국도 이용·하이패스 할인 등으로 다르면 수정(국도면 0).")
-        if applied_dist is not None:
+            disabled=use_car,
+            help="카카오 편도 통행료 × 배수 값이 자동 입력됩니다. 국도 이용·하이패스 할인 등으로 다르면 수정(국도면 0). "
+                 "공무용 차량이면 통행료도 0으로 처리됩니다.")
+        if use_car:
+            st.caption("ⓘ 공무용 차량 이용이므로 운임·통행료는 계산에서 0 처리됩니다.")
+        elif applied_dist is not None:
             st.caption(f"ⓘ 적용 주행거리: 편도 {last_km_oneway:,.1f}km × {trip_multiplier} = "
                        f"**{applied_dist:,.1f}km** · 통행료 기본값 {applied_toll_default:,} 원 "
                        f"(편도 {last_toll_oneway:,} × {trip_multiplier})")
