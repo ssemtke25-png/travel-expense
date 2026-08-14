@@ -74,33 +74,25 @@ FUEL_STANDARDS = {
     "플러그인하이브리드":  {"eff": 10.61, "unit": "km/L"},
     "전기":              {"eff": 5.22,  "unit": "km/kWh"},
 }
-# 플러그인하이브리드는 규정상 연비(10.61 km/L)와 전비(2.84 km/kWh)가 모두 제시됨.
-# 여기서는 유류(휘발유) 운행 기준의 연비(10.61 km/L)를 기본값으로 사용.
-# 전기 운행분으로 계산하려면 유종을 '전기'로 바꾸거나 아래 값을 참고해 수기 수정.
 PHEV_ELEC_EFF = 2.84  # 플러그인하이브리드 전비(참고용)
 
-# 전기차 전기요금 기본 단가(원/kWh). 공용 급속 대략값. 오피넷 미제공 → 수기 수정 가능.
 DEFAULT_ELEC_PRICE = 300.0
 
-# 유가 조회(오피넷)에서 쓰는 유종 ↔ 표준 유종 매핑
-#   오피넷 유가는 휘발유/경유/자동차용LPG 3종만 제공.
 OIL_PRICE_FUEL_MAP = {
     "휘발유": "휘발유",
     "경유": "경유",
     "LPG": "자동차용LPG",
-    "하이브리드": "휘발유",         # 하이브리드는 휘발유가 기준
-    "플러그인하이브리드": "휘발유",  # PHEV도 휘발유가 기준
-    "전기": None,                  # 전기는 유가 아님(전기요금)
+    "하이브리드": "휘발유",
+    "플러그인하이브리드": "휘발유",
+    "전기": None,
 }
 
-# 숙박비 상한 지역 구분 라벨 → 상수 키 매핑
 SUKBAK_REGION = {
     "서울특별시": "숙박비_상한_서울",
     "광역시": "숙박비_상한_광역시",
     "그 밖의 지역": "숙박비_상한_그밖",
 }
 
-# ---- 오피넷 유종 코드 ----
 OPINET_PRODUCTS = {
     "휘발유": "B027",
     "고급휘발유": "B034",
@@ -109,7 +101,6 @@ OPINET_PRODUCTS = {
     "자동차용LPG": "K015",
 }
 
-# ---- 오피넷 시도 코드 ----
 OPINET_SIDO = {
     "서울": "01", "경기": "31", "강원": "42", "충북": "43", "충남": "44",
     "전북": "45", "전남": "46", "경북": "47", "경남": "48", "부산": "26",
@@ -128,11 +119,7 @@ KAKAO_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
 # =============================================================
 @st.cache_data(ttl=1800)
 def load_oil_history() -> pd.DataFrame:
-    """
-    유가 누적 CSV 로드 (GitHub Actions가 매일 수집).
-    컬럼: 날짜, 지역(전국/경북), 유종, 가격
-    아직 파일이 없으면 빈 DataFrame 반환 (앱은 정상 작동).
-    """
+    """유가 누적 CSV 로드. 없으면 빈 DataFrame."""
     try:
         df = pd.read_csv("data/oil_history.csv")
         df["날짜"] = df["날짜"].astype(str)
@@ -142,7 +129,6 @@ def load_oil_history() -> pd.DataFrame:
 
 
 def lookup_oil_price(hist: pd.DataFrame, date_str: str, region: str, fuel: str):
-    """누적 CSV에서 특정 날짜·지역·유종의 유가를 찾는다. 없으면 None."""
     if hist.empty:
         return None
     m = hist[(hist["날짜"] == date_str) & (hist["지역"] == region) & (hist["유종"] == fuel)]
@@ -156,7 +142,6 @@ def lookup_oil_price(hist: pd.DataFrame, date_str: str, region: str, fuel: str):
 # =============================================================
 @st.cache_data(ttl=3600)
 def fetch_oil_price_nationwide() -> pd.DataFrame:
-    """전국 평균 유가 (avgAllPrice)."""
     if not OPINET_KEY:
         return pd.DataFrame()
     url = f"{OPINET_BASE}/avgAllPrice.do"
@@ -173,7 +158,6 @@ def fetch_oil_price_nationwide() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def fetch_oil_price_sido() -> pd.DataFrame:
-    """시도별 평균 유가 (avgSidoPrice)."""
     if not OPINET_KEY:
         return pd.DataFrame()
     url = f"{OPINET_BASE}/avgSidoPrice.do"
@@ -190,7 +174,6 @@ def fetch_oil_price_sido() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def fetch_oil_price_sigun(sido_code: str, product_code: str) -> pd.DataFrame:
-    """시군구별 평균 유가 (avgSigunPrice)."""
     if not OPINET_KEY:
         return pd.DataFrame()
     url = f"{OPINET_BASE}/avgSigunPrice.do"
@@ -209,14 +192,6 @@ def fetch_oil_price_sigun(sido_code: str, product_code: str) -> pd.DataFrame:
 # 카카오 지오코딩 + 길찾기
 # =============================================================
 def geocode_debug(address: str) -> dict:
-    """
-    주소 → 좌표 + 실패 사유.
-    반환: {'ok': bool, 'xy': (x,y)|None, 'reason': str, 'method': str}
-
-    1차: 주소 검색 API(address.json)
-    2차: 1차 실패 시 키워드 검색 API(keyword.json)로 폴백
-         (도로명 상세가 정확히 안 맞거나 건물명/약식 주소일 때 대응)
-    """
     if not KAKAO_REST_KEY:
         return {"ok": False, "xy": None, "method": "-",
                 "reason": "카카오 REST 키가 secrets에 설정되지 않았습니다."}
@@ -226,7 +201,6 @@ def geocode_debug(address: str) -> dict:
     addr = address.strip()
     headers = {"Authorization": f"KakaoAK {KAKAO_REST_KEY}"}
 
-    # --- 1차: 주소 검색 ---
     try:
         r = requests.get(KAKAO_GEOCODE_URL, headers=headers,
                          params={"query": addr}, timeout=10)
@@ -247,7 +221,6 @@ def geocode_debug(address: str) -> dict:
         return {"ok": False, "xy": None, "method": "address",
                 "reason": f"주소검색 호출 예외: {type(e).__name__}: {e}"}
 
-    # --- 2차: 키워드 검색 폴백 ---
     try:
         r2 = requests.get(KAKAO_KEYWORD_URL, headers=headers,
                           params={"query": addr}, timeout=10)
@@ -270,21 +243,13 @@ def geocode_debug(address: str) -> dict:
 
 @st.cache_data(ttl=86400)
 def geocode(address: str):
-    """주소 → (경도 x, 위도 y). 실패 시 None. (일괄 처리용 간단 래퍼)"""
     result = geocode_debug(address)
     return result["xy"] if result["ok"] else None
 
 
 @st.cache_data(ttl=86400)
 def get_road_distance(origin_xy, dest_xy):
-    """
-    좌표 → 도로 주행거리(m, 편도), 소요시간(s), 통행료(원, 편도).
-    카카오모빌리티 자동차 길찾기 API. ★사용 권한 승인 필요★
-    반환: {"ok": True, ...} 또는 {"ok": False, "reason": "..."}
-
-    ★ 여기서 나오는 distance_m·toll은 모두 '편도' 기준.
-      출장은 왕복이므로 유류비·통행료 계산 시 ×2 처리는 호출부에서 수행.
-    """
+    """좌표 → 도로 주행거리(m, 편도), 소요시간(s), 통행료(원, 편도)."""
     if not KAKAO_REST_KEY:
         return {"ok": False, "reason": "카카오 키가 설정되지 않았습니다."}
     if not origin_xy or not dest_xy:
@@ -297,7 +262,6 @@ def get_road_distance(origin_xy, dest_xy):
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
-        # 권한 미승인 시 401/403 계열
         if r.status_code in (401, 403):
             return {"ok": False, "reason": "길찾기 API 사용 권한이 아직 승인되지 않았습니다. "
                                            "카카오 데브톡 승인 후 자동으로 작동합니다."}
@@ -305,9 +269,9 @@ def get_road_distance(origin_xy, dest_xy):
         summary = r.json()["routes"][0]["summary"]
         return {
             "ok": True,
-            "distance_m": summary["distance"],                 # 편도(m)
+            "distance_m": summary["distance"],
             "duration_s": summary["duration"],
-            "toll": summary.get("fare", {}).get("toll", 0),    # 편도 통행료
+            "toll": summary.get("fare", {}).get("toll", 0),
         }
     except Exception as e:
         return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
@@ -317,12 +281,7 @@ def get_road_distance(origin_xy, dest_xy):
 # 계산 로직
 # =============================================================
 def calc_fuel_cost(distance_km: float, efficiency: float, unit_price: float) -> float:
-    """
-    운행비 = 거리 ÷ 연비(또는 전비) × 단가.
-      - 내연차: 연비(km/L) × 유가(원/L)
-      - 전기차: 전비(km/kWh) × 전기요금(원/kWh)
-    distance_km 에는 '왕복' 거리를 넣어야 왕복 운임이 나온다.
-    """
+    """운행비 = 거리 ÷ 연비(전비) × 단가. distance_km 에는 최종 주행거리를 넣는다."""
     if efficiency <= 0:
         return 0.0
     return (distance_km / efficiency) * unit_price
@@ -330,30 +289,27 @@ def calc_fuel_cost(distance_km: float, efficiency: float, unit_price: float) -> 
 
 def calculate_travel_allowance(
     *,
-    is_gwannae: bool,          # 관내(근무지 내) 출장 여부
-    hours_over_4: bool,        # (관내) 4시간 이상 여부
-    use_official_car: bool,    # 공무용 차량 이용 여부
-    days: int,                 # 출장일수(관외 일비·식비 계산용)
-    nights: int,               # 숙박 밤 수
-    sukbak_region_key: str,    # 숙박비 상한 지역 키
-    fuel_cost: float,          # 운임(자가차 유류/전기비, 왕복). 운임 대체로 사용 가능
-    manual_transport: float,   # 운임(대중교통 등) 수기 입력값
-    toll: float = 0.0,         # 통행료(왕복, 수기 수정 반영된 최종값) — 별도 항목
+    is_gwannae: bool,
+    hours_over_4: bool,
+    use_official_car: bool,
+    days: int,
+    nights: int,
+    sukbak_region_key: str,
+    fuel_cost: float,
+    manual_transport: float,
+    toll: float = 0.0,
+    num_passengers: int = 0,   # 동승자 수 (운전자 제외)
 ) -> dict:
     """
-    「공무원 여비 규정」 준용 여비 산출.
+    「공무원 여비 규정」 준용 여비 산출 (운전자 + 동승자 분리).
 
-    - 관내(근무지 내, 제18조): 정액 지급.
-        4시간 이상 20,000 / 미만 10,000, 공무용 차량 이용 시 10,000 감액.
-        (일비·식비·숙박비 별도 지급 없음)
-    - 관외(근무지 외, 별표2): 운임 + 일비 + 식비 + 숙박비 + 통행료 합산.
-        일비 = 일수 × 단가 (공무용 차량 이용 시 1/2)
-        식비 = 일수 × 단가
-        숙박비 = 밤 수 × 지역별 상한(실비, 상한 이내)
-        운임 = 대중교통 수기입력, 자가차면 왕복 유류/전기비를 운임 자리에 사용
-        통행료 = 왕복 기본값(편도×2)을 사용자가 수기 수정 (국도 이용 시 0)
+    운전자: 운임 + 일비 + 식비 + 숙박비 + 통행료
+    동승자: 일비 + 식비 + 숙박비 (운임·통행료 없음 — 같은 차 이용)
+      * 관내 정액 출장은 동승자 개념을 적용하지 않음(정액 1인 기준).
 
-    반환: 각 항목 금액과 합계 딕셔너리
+    반환:
+      - 관내: {구분, 관내정액, 합계}
+      - 관외: {구분, 운전자:{...}, 동승자단가:{...}, 동승자수, 동승자합계, 총합계}
     """
     result = {}
 
@@ -371,28 +327,48 @@ def calculate_travel_allowance(
     ilbi_unit = ALLOWANCE_RATES["일비_1일"]
     ilbi = ilbi_unit * days
     if use_official_car:
-        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2 (제16조 제3항)
+        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2
 
     sikbi = ALLOWANCE_RATES["식비_1일"] * days
 
     sukbak_cap = ALLOWANCE_RATES.get(sukbak_region_key, ALLOWANCE_RATES["숙박비_상한_그밖"])
     sukbak = sukbak_cap * max(0, nights)
 
-    # 운임: 자가차면 왕복 유류/전기비, 대중교통이면 수기입력. 둘 다 있으면 수기입력 우선.
+    # 운임: 자가차면 유류/전기비(왕복 배수 반영된 값), 대중교통이면 수기입력.
     transport = manual_transport if manual_transport > 0 else fuel_cost
-
-    # 통행료: 별도 항목으로 합산 (운임에 섞지 않음)
+    transport = int(round(transport))
     toll_val = max(0, int(round(toll)))
 
-    total = int(round(ilbi + sikbi + sukbak + transport + toll_val))
-    result.update({
-        "구분": "근무지 외(관외)",
-        "운임": int(round(transport)),
+    # 운전자 1인
+    driver = {
+        "운임": transport,
         "일비": int(ilbi),
         "식비": int(sikbi),
         "숙박비": int(sukbak),
         "통행료": toll_val,
-        "합계": total,
+    }
+    driver["합계"] = sum(driver.values())
+
+    # 동승자 1인 단가 (운임·통행료 없음)
+    pax_unit = {
+        "운임": 0,
+        "일비": int(ilbi),
+        "식비": int(sikbi),
+        "숙박비": int(sukbak),
+        "통행료": 0,
+    }
+    pax_unit["합계"] = sum(pax_unit.values())
+
+    pax_n = max(0, int(num_passengers))
+    pax_total = pax_unit["합계"] * pax_n
+
+    result.update({
+        "구분": "근무지 외(관외)",
+        "운전자": driver,
+        "동승자단가": pax_unit,
+        "동승자수": pax_n,
+        "동승자합계": pax_total,
+        "총합계": driver["합계"] + pax_total,
     })
     return result
 
@@ -403,7 +379,6 @@ def calculate_travel_allowance(
 st.title("🚗 공무원 출장 여비 산정 시스템")
 st.caption("골격 버전 · 저장 기능 없음(세션 유지) · 여비 조례/출력양식은 실물 자료 확보 후 반영")
 
-# API 키 상태 표시
 with st.expander("🔑 API 연결 상태 확인 / 지오코딩 진단", expanded=False):
     c1, c2, c3 = st.columns(3)
     c1.metric("오피넷 유가", "연결됨" if OPINET_KEY else "미설정")
@@ -447,7 +422,7 @@ with tab1:
         else:
             st.info("오피넷 API 키를 secrets에 설정하면 조회됩니다.")
 
-    else:  # 시군별
+    else:
         cc1, cc2 = st.columns(2)
         sido_name = cc1.selectbox("시도", list(OPINET_SIDO.keys()),
                                   index=list(OPINET_SIDO.keys()).index("경북"))
@@ -461,20 +436,95 @@ with tab1:
 
     st.caption("※ 유가는 일 단위 갱신. 2개월치 누적은 별도 수집(GitHub Actions 등)으로 확장 예정.")
 
+
 # -------------------------------------------------------------
 # TAB 2 : 여비 계산 (단건)
 # -------------------------------------------------------------
+# 도착지 시군 버튼 (직재순, 군위 제외 23개) → 지오코딩 접두 주소 매핑
+#   포항남/포항북은 표기만 분리, 접두는 모두 "경상북도 포항시".
+SIGUN_PREFIX = {
+    "포항남": "경상북도 포항시",
+    "포항북": "경상북도 포항시",
+    "경주": "경상북도 경주시",
+    "김천": "경상북도 김천시",
+    "안동": "경상북도 안동시",
+    "구미": "경상북도 구미시",
+    "영주": "경상북도 영주시",
+    "영천": "경상북도 영천시",
+    "상주": "경상북도 상주시",
+    "문경": "경상북도 문경시",
+    "경산": "경상북도 경산시",
+    "의성": "경상북도 의성군",
+    "청송": "경상북도 청송군",
+    "영양": "경상북도 영양군",
+    "영덕": "경상북도 영덕군",
+    "청도": "경상북도 청도군",
+    "고령": "경상북도 고령군",
+    "성주": "경상북도 성주군",
+    "칠곡": "경상북도 칠곡군",
+    "예천": "경상북도 예천군",
+    "봉화": "경상북도 봉화군",
+    "울진": "경상북도 울진군",
+    "울릉": "경상북도 울릉군",
+}
+SIGUN_ORDER = list(SIGUN_PREFIX.keys())  # 직재순
+DEST_OPTIONS = SIGUN_ORDER + ["기타(직접입력)"]
+
+DEFAULT_ORIGIN = "경상북도 안동시 풍천면 도청대로 455"  # 경상북도청
+
+
+def build_dest_address(sigun_choice: str, detail: str) -> str:
+    """
+    시군 버튼 선택 + 세부주소 → 최종 도착지 주소.
+    - '기타' 선택: 세부주소를 그대로 사용.
+    - 시군 선택: 접두(예:'경상북도 안동시') + 세부주소.
+      단 세부주소가 이미 '경상북도'로 시작하거나 시군명을 포함하면
+      접두를 중복으로 붙이지 않고 세부주소를 그대로 쓴다.
+    """
+    detail = (detail or "").strip()
+    if sigun_choice == "기타(직접입력)":
+        return detail
+    prefix = SIGUN_PREFIX.get(sigun_choice, "")
+    if not detail:
+        return prefix  # 세부주소 없으면 시군 대표지점(시/군청 인근)만
+    # 접두 중복 방지: 이미 광역/시군명 들어간 전체주소를 넣은 경우
+    core = prefix.replace("경상북도 ", "")  # 예: '안동시'
+    if detail.startswith("경상북도") or core in detail:
+        return detail
+    return f"{prefix} {detail}"
+
+
 with tab2:
     st.subheader("단건 여비 계산")
 
-    # --- 세션 유지: 공통값(출발지 등) 재사용 ---
+    # === 1) 출장 경로 ===
     st.markdown("##### 1) 출장 경로")
-    c1, c2 = st.columns(2)
-    origin = c1.text_input("출발지 주소", value=st.session_state.get("origin", ""),
-                           placeholder="예) 경상북도 안동시 풍천면 도청대로 455")
-    dest = c2.text_input("도착지 주소", placeholder="예) 경상북도 경주시 ○○면 ○○리 123")
-    st.session_state["origin"] = origin  # 다음 건에서 출발지 재사용
+    origin = st.text_input(
+        "출발지 주소",
+        value=st.session_state.get("origin", DEFAULT_ORIGIN),
+        help="기본값은 경상북도청입니다. 필요 시 수정하세요.",
+    )
+    st.session_state["origin"] = origin
 
+    st.markdown("**도착지 시군 선택** (직재순)")
+    sigun_choice = st.radio(
+        "도착 시군", DEST_OPTIONS, horizontal=True, label_visibility="collapsed",
+    )
+    if sigun_choice == "기타(직접입력)":
+        dest_detail = st.text_input(
+            "도착지 주소(전체 입력)",
+            placeholder="예) 대구광역시 북구 ○○로 123",
+        )
+    else:
+        dest_detail = st.text_input(
+            f"세부 주소 — '{SIGUN_PREFIX[sigun_choice]}' 뒤에 이어질 부분만 입력",
+            placeholder="예) 풍천면 도청대로 455  (시·도·시군명은 생략 가능)",
+        )
+    dest = build_dest_address(sigun_choice, dest_detail)
+    if dest:
+        st.caption(f"🎯 최종 도착지: **{dest}**")
+
+    # === 2) 차량 유종 / 연비 ===
     st.markdown("##### 2) 차량 유종 / 연비 (규정 표준값)")
     st.caption("「공무원 여비업무 처리기준(2023.1.18.)」 유종별 표준 연비를 기본값으로 적용합니다. "
                "실측값이 있으면 수정하세요.")
@@ -491,11 +541,11 @@ with tab2:
                    f"전비 {PHEV_ELEC_EFF} km/kWh가 모두 제시됩니다. 기본은 연비 기준이며, "
                    f"전기 운행분으로 계산하려면 유종을 '전기'로 바꾸거나 위 값을 전비로 수정하세요.")
 
+    # === 3) 단가 ===
     st.markdown("##### 3) 단가 (유가 또는 전기요금)")
     hist = load_oil_history()
 
     if is_electric:
-        # 전기: 전기요금(원/kWh) 수기 입력, 기본값 300원/kWh
         c_e1, c_e2 = st.columns([1, 3])
         oil_price = c_e1.number_input("전기요금(원/kWh)", min_value=0.0,
                                       value=DEFAULT_ELEC_PRICE, step=10.0,
@@ -503,25 +553,20 @@ with tab2:
                                            "기본값은 공용 급속 대략 단가(300원/kWh).")
         c_e2.caption("ⓘ 전기차는 유가가 아니라 전기요금(원/kWh)으로 계산합니다. "
                      "충전 방식(급속/완속·공용/자가)에 따라 단가가 크게 다르니 실제 단가로 수정하세요.")
-        region = "전국"  # 전기는 지역 유가 불필요(자리만 유지)
+        region = "전국"
         sel_date = None
         auto_price = None
     else:
         c6, c7, c8, c9 = st.columns([1.2, 1, 1.2, 1])
-
-        # 오피넷 유가 조회용 유종으로 변환 (하이브리드→휘발유 등)
         oil_fuel = OIL_PRICE_FUEL_MAP.get(fuel_type, "휘발유")
         c6.text_input("유가 기준 유종", value=oil_fuel, disabled=True,
                       help="하이브리드·PHEV는 휘발유 유가를 기준으로 합니다.")
         region = c7.selectbox("지역 기준", ["전국", "경북"],
                               help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요.")
-
-        # 누적 CSV에 있는 날짜 목록 (최신순). 없으면 안내.
         if not hist.empty:
             avail_dates = sorted(hist["날짜"].unique().tolist(), reverse=True)
         else:
             avail_dates = []
-
         auto_price = None
         if avail_dates:
             sel_date = c8.selectbox("유가 기준일", avail_dates,
@@ -530,12 +575,10 @@ with tab2:
         else:
             c8.selectbox("유가 기준일", ["(누적 데이터 없음)"], disabled=True)
             sel_date = None
-
         default_price = auto_price if auto_price is not None else 0.0
         oil_price = c9.number_input("적용 유가(원/L)", min_value=0.0,
                                     value=float(default_price), step=1.0,
                                     help="선택한 날짜·지역·유종의 오피넷 값이 자동 입력됩니다. 수정 가능.")
-
         if avail_dates and auto_price is not None:
             st.caption(f"✅ {sel_date} · {region} · {oil_fuel} 유가 자동 적용: {auto_price:,.2f} 원/L")
         elif avail_dates and auto_price is None:
@@ -544,57 +587,42 @@ with tab2:
             st.caption("ⓘ 유가 누적 데이터가 아직 쌓이지 않았습니다. GitHub Actions가 매일 수집하며, "
                        "며칠 후부터 날짜 선택이 가능해집니다. 그전까지는 유가를 수기 입력하세요.")
 
-    # --- 계산 (단계별 에러 구분) ---
+    # === 거리·운임 계산 ===
     if st.button("거리 · 운임 계산", type="primary"):
         if not origin or not dest:
-            st.error("출발지와 도착지 주소를 모두 입력하세요.")
+            st.error("출발지와 도착지 주소를 모두 입력하세요. (도착지: 시군 선택 후 세부주소 또는 기타 입력)")
         else:
             o = geocode_debug(origin)
             d = geocode_debug(dest)
-            # 1단계: 지오코딩 실패 시 구체적 사유 표시
             if not o["ok"] or not d["ok"]:
                 if not o["ok"]:
                     st.error(f"출발지 실패 [{o['method']}] → {o['reason']}")
                 if not d["ok"]:
                     st.error(f"도착지 실패 [{d['method']}] → {d['reason']}")
-                st.caption("↑ 위 상단 '🔑 API 연결 상태 확인 / 지오코딩 진단' 을 펼쳐 "
-                           "단독 테스트로 원인을 좁힐 수 있습니다.")
+                st.caption("↑ 상단 '🔑 API 연결 상태 확인 / 지오코딩 진단'에서 단독 테스트로 원인을 좁힐 수 있습니다.")
             else:
                 o_xy, d_xy = o["xy"], d["xy"]
                 st.success(f"주소 좌표 변환 성공 ✓ (출발지:{o['method']} / 도착지:{d['method']})")
-                # 2단계: 길찾기
                 route = get_road_distance(o_xy, d_xy)
                 if not route["ok"]:
                     st.warning(f"도로거리 계산 대기: {route['reason']}")
                     st.info("주소 인식은 정상입니다. 길찾기 승인 후 이 버튼만 다시 누르면 거리가 나옵니다.")
                 else:
                     dist_km_oneway = route["distance_m"] / 1000
-                    dist_km_round = dist_km_oneway * 2  # 왕복
                     st.session_state["last_dist_km_oneway"] = dist_km_oneway
-                    st.session_state["last_dist_km_round"] = dist_km_round
-                    # 편도 통행료 → 왕복 기본값 저장
                     st.session_state["last_toll_oneway"] = int(route["toll"])
-                    st.session_state["last_toll_roundtrip"] = int(route["toll"]) * 2
-
-                    fuel_cost = calc_fuel_cost(dist_km_round, eff, oil_price)  # 왕복 운임
-                    m1, m2, m3 = st.columns(3)
+                    m1, m2 = st.columns(2)
                     m1.metric("도로거리(편도)", f"{dist_km_oneway:,.1f} km")
-                    m2.metric("왕복거리", f"{dist_km_round:,.1f} km")
-                    unit_txt = "전기비" if is_electric else "유류비"
-                    m3.metric(f"{unit_txt}(왕복)", f"{fuel_cost:,.0f} 원")
+                    m2.metric("통행료(편도)", f"{int(route['toll']):,} 원")
                     st.caption(f"예상 소요시간(편도): {route['duration_s']//60} 분")
-                    if route["toll"]:
-                        st.caption(f"통행료(편도): {route['toll']:,} 원 · 왕복 기본값 {route['toll']*2:,} 원 "
-                                   "(아래 여비 산정 통행료 칸에 자동 반영, 수정 가능)")
+                    st.caption("ⓘ 왕복·운임·통행료 최종 금액은 아래 '4) 여비 산정'의 운임 배수 설정에 따라 계산됩니다.")
 
-    # --- 여비 항목 (관내/관외 분기) ---
+    # === 4) 여비 산정 ===
     st.markdown("##### 4) 여비 산정")
-    st.caption("「공무원 여비 규정」 준용. 단가는 상단 ALLOWANCE_RATES 기본값(국가 규정)이며, "
-               "경상북도 여비 조례 값으로 최종 확인·교체하세요.")
+    st.caption("「공무원 여비 규정」 준용. 단가는 상단 ALLOWANCE_RATES 기본값(국가 규정)입니다. "
+               "경상북도 별도 조례가 없어 국가 규정을 그대로 적용합니다.")
 
-    # 관내/관외 자동 추천 (편도 거리 기준). 계산된 거리가 있으면 참고로 안내.
     last_km_oneway = st.session_state.get("last_dist_km_oneway")
-    last_km_round = st.session_state.get("last_dist_km_round")
     auto_gwannae = None
     if last_km_oneway is not None:
         auto_gwannae = last_km_oneway < ALLOWANCE_RATES["관내_거리기준_km"]
@@ -604,17 +632,42 @@ with tab2:
 
     g1, g2 = st.columns(2)
     trip_type = g1.radio(
-        "출장 구분",
-        ["근무지 외(관외)", "근무지 내(관내)"],
-        index=(1 if auto_gwannae else 0),
-        horizontal=True,
+        "출장 구분", ["근무지 외(관외)", "근무지 내(관내)"],
+        index=(1 if auto_gwannae else 0), horizontal=True,
         help="같은 시·군 안 또는 여행거리 12km 미만이면 관내입니다.",
     )
     use_car = g2.checkbox("공무용 차량 이용",
                           help="관내: 1만원 감액 / 관외: 일비 1/2 지급")
-
     is_gwannae = (trip_type == "근무지 내(관내)")
 
+    # --- 운임 배수 (핵심) ---
+    st.markdown("**운임 배수 (왕복 처리)**")
+    rc1, rc2 = st.columns([1, 3])
+    trip_multiplier = rc1.number_input(
+        "편도 × 배수", min_value=1, value=2, step=1,
+        help="편도 거리에 곱할 배수. 기본 2 = 표준 왕복 1회(갔다 옴).",
+    )
+    rc2.caption(
+        "ⓘ 편도 거리에 이 배수를 곱해 운임·통행료를 계산합니다. "
+        "**표준 왕복은 2**(갔다가 돌아옴). 숙박(1박 이상)이라도 통상 왕래는 1회이므로 2를 유지하세요. "
+        "당일 2회 왕복이면 4, 며칠간 매일 출퇴근하면 (일수×2) 등으로 조정합니다."
+    )
+
+    # --- 운전자/동승자 성명 ---
+    st.markdown("**출장자 (엑셀 추출용)**")
+    nm1, nm2 = st.columns([1, 1])
+    driver_name = nm1.text_input("운전자 성명", placeholder="예) 홍길동")
+    num_pax = nm2.number_input("동승자 수 (최대 4)", min_value=0, max_value=4, value=0, step=1)
+    passenger_names = []
+    if num_pax > 0:
+        pcols = st.columns(int(num_pax))
+        for i in range(int(num_pax)):
+            pname = pcols[i].text_input(f"동승자 {i+1}", key=f"pax_{i}", placeholder="성명")
+            passenger_names.append(pname)
+    st.caption("ⓘ 동승자는 같은 차량 탑승 기준입니다. 운임·통행료는 운전자만, "
+               "일비·식비·숙박비는 전원 각자 지급됩니다.")
+
+    # --- 관내/관외 세부 입력 ---
     if is_gwannae:
         hours_over_4 = st.radio("출장 시간", ["4시간 이상", "4시간 미만"],
                                 horizontal=True) == "4시간 이상"
@@ -633,26 +686,28 @@ with tab2:
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
 
+        # 편도 거리·통행료 → 배수 적용
+        last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
+        applied_dist = (last_km_oneway * trip_multiplier) if last_km_oneway is not None else None
+        applied_toll_default = last_toll_oneway * trip_multiplier
+
         f1, f2 = st.columns(2)
         manual_transport = f1.number_input(
-            "운임(대중교통 등, 원) — 비우면 위 왕복 운임 사용", min_value=0, value=0, step=1000,
-            help="자가차 출장이면 비워두세요(위에서 계산된 왕복 유류/전기비가 운임 자리에 들어갑니다). "
+            "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
+            help="자가차 출장이면 비워두세요(편도×배수 유류/전기비가 운임으로 들어갑니다). "
                  "KTX·버스 등 대중교통이면 실비를 입력하세요.")
-
-        # 통행료: 카카오 왕복 기본값(편도×2)을 채우되 수기 수정 가능. 국도 이용이면 0으로.
-        default_toll = int(st.session_state.get("last_toll_roundtrip", 0))
         toll_input = f2.number_input(
-            "통행료(왕복, 원)", min_value=0, value=default_toll, step=100,
-            help="카카오 경로 통행료의 왕복 기본값(편도×2)이 자동 입력됩니다. "
-                 "국도 이용·하이패스 할인 등으로 다르면 직접 수정(국도면 0).")
-        if default_toll > 0:
-            st.caption(f"ⓘ 통행료 왕복 기본값 {default_toll:,} 원 자동 반영됨 "
-                       f"(편도 {st.session_state.get('last_toll_oneway', 0):,} 원 × 2). 필요 시 수정.")
+            "통행료(원)", min_value=0, value=int(applied_toll_default), step=100,
+            help="카카오 편도 통행료 × 배수 값이 자동 입력됩니다. 국도 이용·하이패스 할인 등으로 다르면 수정(국도면 0).")
+        if applied_dist is not None:
+            st.caption(f"ⓘ 적용 주행거리: 편도 {last_km_oneway:,.1f}km × {trip_multiplier} = "
+                       f"**{applied_dist:,.1f}km** · 통행료 기본값 {applied_toll_default:,} 원 "
+                       f"(편도 {last_toll_oneway:,} × {trip_multiplier})")
 
-    # 운임(왕복 유류/전기비): 직전 계산의 왕복거리로 재계산해서 사용
+    # --- 자가차 유류/전기비: 편도 × 배수 ---
     fuel_cost_val = 0.0
-    if last_km_round is not None:
-        fuel_cost_val = calc_fuel_cost(last_km_round, eff, oil_price)
+    if last_km_oneway is not None:
+        fuel_cost_val = calc_fuel_cost(last_km_oneway * trip_multiplier, eff, oil_price)
 
     if st.button("여비 합계 계산", type="primary", key="calc_allowance"):
         res = calculate_travel_allowance(
@@ -665,22 +720,38 @@ with tab2:
             fuel_cost=fuel_cost_val,
             manual_transport=float(manual_transport),
             toll=float(toll_input),
+            num_passengers=int(num_pax),
         )
         st.markdown(f"**구분: {res['구분']}**")
+
         if is_gwannae:
             st.metric("관내 정액 여비", f"{res['관내정액']:,} 원")
+            st.caption(f"운전자: {driver_name or '(성명 미입력)'}")
         else:
-            cc = st.columns(5)
-            cc[0].metric("운임(왕복)", f"{res['운임']:,} 원")
-            cc[1].metric("일비", f"{res['일비']:,} 원")
-            cc[2].metric("식비", f"{res['식비']:,} 원")
-            cc[3].metric("숙박비", f"{res['숙박비']:,} 원")
-            cc[4].metric("통행료", f"{res['통행료']:,} 원")
-        st.success(f"여비 합계: {res['합계']:,} 원")
-        st.caption("※ 단가·관내 판정·차량 감액은 경상북도 여비 조례로 최종 확인하세요. "
-                   "숙박비는 실비 정산(상한 이내), 통행료는 실비가 원칙입니다.")
+            drv = res["운전자"]
+            st.markdown(f"**🚗 운전자: {driver_name or '(성명 미입력)'}**")
+            cc = st.columns(6)
+            cc[0].metric("운임", f"{drv['운임']:,} 원")
+            cc[1].metric("일비", f"{drv['일비']:,} 원")
+            cc[2].metric("식비", f"{drv['식비']:,} 원")
+            cc[3].metric("숙박비", f"{drv['숙박비']:,} 원")
+            cc[4].metric("통행료", f"{drv['통행료']:,} 원")
+            cc[5].metric("운전자 합계", f"{drv['합계']:,} 원")
 
-    st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다.")
+            if res["동승자수"] > 0:
+                pu = res["동승자단가"]
+                st.markdown(f"**🧑‍🤝‍🧑 동승자 {res['동승자수']}명** (1인당 일비+식비+숙박비 = {pu['합계']:,} 원)")
+                for i, pname in enumerate(passenger_names):
+                    st.write(f"　- 동승자 {i+1}: {pname or '(성명 미입력)'} → {pu['합계']:,} 원")
+                st.caption(f"동승자 소계: {pu['합계']:,} 원 × {res['동승자수']}명 = {res['동승자합계']:,} 원")
+
+            st.success(f"총 여비 합계 (운전자 + 동승자 {res['동승자수']}명): {res['총합계']:,} 원")
+            st.caption("※ 운임·통행료는 운전자만, 일비·식비·숙박비는 전원 각자. "
+                       "숙박비는 실비 정산(상한 이내), 통행료는 실비가 원칙입니다.")
+
+    st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다. "
+            "운전자·동승자 성명은 그때 엑셀 추출에 사용됩니다.")
+
 
 # -------------------------------------------------------------
 # TAB 3 : 명단 일괄 처리
@@ -692,7 +763,6 @@ with tab3:
         "**업로드 파일은 처리만 하며 서버에 저장하지 않습니다.**"
     )
 
-    # 템플릿 다운로드
     template = pd.DataFrame({
         "성명": ["홍길동"],
         "직급": ["주무관"],
@@ -700,6 +770,7 @@ with tab3:
         "도착지": ["경상북도 경주시 ○○로 123"],
         "유종": ["휘발유"],
         "출장일수": [1],
+        "운임배수": [2],
     })
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as w:
@@ -708,7 +779,7 @@ with tab3:
                        file_name="출장자_명단_양식.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.caption("※ 유종은 휘발유/경유/LPG/하이브리드/플러그인하이브리드/전기 중 입력. "
-               "연비는 규정 표준값이 자동 적용됩니다.")
+               "연비는 규정 표준값이 자동 적용됩니다. 운임배수는 편도에 곱할 값(표준 왕복=2).")
 
     up = st.file_uploader("작성한 명단 업로드 (.xlsx)", type=["xlsx"])
     if up is not None:
@@ -726,10 +797,18 @@ with tab3:
                     route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
                     ok = bool(route and route.get("ok"))
                     dist_km_oneway = route["distance_m"] / 1000 if ok else None
-                    dist_km_round = dist_km_oneway * 2 if dist_km_oneway is not None else None
                     toll_oneway = int(route["toll"]) if ok else None
 
-                    # 유종 → 규정 표준 연비
+                    try:
+                        mult = int(r.get("운임배수", 2))
+                    except Exception:
+                        mult = 2
+                    if mult < 1:
+                        mult = 1
+
+                    dist_applied = dist_km_oneway * mult if dist_km_oneway is not None else None
+                    toll_applied = toll_oneway * mult if toll_oneway is not None else None
+
                     ft = str(r.get("유종", "휘발유")).strip()
                     std = FUEL_STANDARDS.get(ft)
                     eff_val = std["eff"] if std else None
@@ -743,18 +822,18 @@ with tab3:
                         "유종": ft,
                         "표준연비/전비": f"{eff_val} {eff_unit}" if eff_val else "유종 확인",
                         "편도(km)": round(dist_km_oneway, 1) if dist_km_oneway else "조회실패",
-                        "왕복(km)": round(dist_km_round, 1) if dist_km_round else "조회실패",
-                        "통행료(왕복,원)": toll_oneway * 2 if toll_oneway is not None else "조회실패",
+                        "운임배수": mult,
+                        "적용거리(km)": round(dist_applied, 1) if dist_applied else "조회실패",
+                        "통행료(원)": toll_applied if toll_applied is not None else "조회실패",
                         "출장일수": r.get("출장일수"),
                     })
                     prog.progress((i + 1) / len(df_in))
-                    time.sleep(0.05)  # API 과호출 방지
+                    time.sleep(0.05)
 
                 res_df = pd.DataFrame(results)
                 st.success("계산 완료")
                 st.dataframe(res_df, width="stretch")
 
-                # 결과 엑셀 다운로드
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine="openpyxl") as w:
                     res_df.to_excel(w, index=False, sheet_name="여비산정결과")
@@ -764,4 +843,4 @@ with tab3:
         except Exception as e:
             st.error(f"파일 처리 오류: {e}")
 
-    st.caption("※ 여비 최종 합산·조례 반영·정식 출력양식은 실물 자료 확보 후 반영 예정.")
+    st.caption("※ 여비 최종 합산·정식 출력양식은 실물 자료 확보 후 반영 예정.")
