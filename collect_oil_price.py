@@ -26,7 +26,9 @@ PROD = {
     "D047": "경유",
     "K015": "자동차용LPG",
 }
-GYEONGBUK_SIDO = "47"      # 경북 시도코드
+# 오피넷 avgSidoPrice 는 자체 순번 코드(전국00, 서울01...)를 쓴다.
+# 행정표준코드(경북47)와 다르므로, 코드 대신 시도명(SIDONM)으로 매칭한다.
+GYEONGBUK_NAMES = {"경북", "경상북도"}
 KEEP_DAYS = 62             # 약 2개월치 유지
 
 
@@ -45,14 +47,15 @@ def fetch_nationwide():
 
 
 def fetch_gyeongbuk():
-    """경북 시도 평균 유가 → [(유종명, 가격), ...]"""
+    """경북 시도 평균 유가 → [(유종명, 가격), ...]. 시도명으로 매칭."""
     r = requests.get(f"{BASE}/avgSidoPrice.do",
                      params={"code": OPINET_KEY, "out": "json"}, timeout=15)
     r.raise_for_status()
     rows = r.json()["RESULT"]["OIL"]
     out = []
     for row in rows:
-        if row.get("SIDOCD") == GYEONGBUK_SIDO and row.get("PRODCD") in PROD:
+        name = str(row.get("SIDONM", "")).strip()
+        if name in GYEONGBUK_NAMES and row.get("PRODCD") in PROD:
             out.append((PROD[row["PRODCD"]], float(row["PRICE"])))
     return out
 
