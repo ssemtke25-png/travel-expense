@@ -20,6 +20,7 @@ API 키는 .streamlit/secrets.toml (또는 Streamlit Cloud Secrets)에서 로드
 
 import io
 import time
+from datetime import date, timedelta
 import requests
 import pandas as pd
 import streamlit as st
@@ -327,9 +328,18 @@ def calculate_travel_allowance(
         if use_official_car:
             base = max(0, base - ALLOWANCE_RATES["관내_공무용차량감액"])
         base = floor10(base)
-        result["구분"] = "근무지 내(관내)"
-        result["관내정액"] = base
-        result["합계"] = base
+        # 관내는 정액. 운전자·동승자 모두 동일 금액(감액도 동일 적용).
+        pax_n = max(0, int(num_passengers))
+        result.update({
+            "구분": "근무지 내(관내)",
+            "관내정액": base,          # 1인 정액(하위호환)
+            "운전자정액": base,
+            "동승자정액": base,
+            "동승자수": pax_n,
+            "동승자합계": base * pax_n,
+            "합계": base,              # 운전자 1인 기준(하위호환)
+            "총합계": base + base * pax_n,
+        })
         return result
 
     # --- 관외 ---
@@ -545,13 +555,24 @@ with tab2:
     if is_gwannae:
         st.markdown("#### 근무지 내(관내) 출장 — 정액 여비")
         st.caption("「공무원 여비 규정」 제18조: 4시간 이상 20,000원 / 4시간 미만 10,000원. "
-                   "공무용 차량 이용 시 10,000원 감액. (경로·유종·유가 입력 불필요)")
+                   "공무용 차량 이용 시 10,000원 감액. 운전자·동승자 동일 정액. (경로·유종·유가 입력 불필요)")
 
-        gi1, gi2 = st.columns(2)
-        driver_name = gi1.text_input("출장자 성명", placeholder="예) 홍길동",
+        gi0, gi1, gi2 = st.columns([1, 1, 1])
+        trip_date_g = gi0.date_input("출장일자", value=date.today(),
+                                     help="엑셀 추출용. 관내는 당일 기준입니다.")
+        driver_name = gi1.text_input("운전자 성명", placeholder="예) 홍길동",
                                      help="엑셀 추출용")
         hours_over_4 = gi2.radio("출장 시간", ["4시간 이상", "4시간 미만"],
                                  horizontal=True) == "4시간 이상"
+
+        num_pax = st.number_input("동승자 수 (최대 4)", min_value=0, max_value=4, value=0, step=1)
+        passenger_names = []
+        if num_pax > 0:
+            pcols = st.columns(int(num_pax))
+            for i in range(int(num_pax)):
+                pname = pcols[i].text_input(f"동승자 {i+1}", key=f"gpax_{i}", placeholder="성명")
+                passenger_names.append(pname)
+        st.caption("ⓘ 관내는 정액이라 운전자·동승자 모두 같은 금액을 각자 받습니다.")
 
         if st.button("여비 계산", type="primary", key="calc_gwannae"):
             res = calculate_travel_allowance(
@@ -561,14 +582,20 @@ with tab2:
                 days=0, nights=0,
                 sukbak_region_key="숙박비_상한_그밖",
                 fuel_cost=0.0, manual_transport=0.0, toll=0.0,
-                num_passengers=0,
+                num_passengers=int(num_pax),
             )
-            st.markdown(f"**구분: {res['구분']}**")
-            st.markdown(f"출장자: **{driver_name or '(성명 미입력)'}**")
-            st.metric("관내 정액 여비", f"{res['관내정액']:,} 원")
-            st.caption("※ 십원 미만 버림 적용. 관내는 일비·식비·숙박비·운임 별도 지급 없음.")
+            st.markdown(f"**구분: {res['구분']}** · 출장일자: {trip_date_g:%Y-%m-%d}")
+            st.markdown(f"**🚗 운전자: {driver_name or '(성명 미입력)'}** → {res['운전자정액']:,} 원")
+            if res["동승자수"] > 0:
+                st.markdown(f"**🧑‍🤝‍🧑 동승자 {res['동승자수']}명** (1인당 {res['동승자정액']:,} 원)")
+                for i, pname in enumerate(passenger_names):
+                    st.write(f"　- 동승자 {i+1}: {pname or '(성명 미입력)'} → {res['동승자정액']:,} 원")
+                st.caption(f"동승자 소계: {res['동승자정액']:,} 원 × {res['동승자수']}명 = {res['동승자합계']:,} 원")
+            st.success(f"총 여비 합계 (운전자 + 동승자 {res['동승자수']}명): {res['총합계']:,} 원")
+            st.caption("※ 십원 미만 버림 적용. 관내는 일비·식비·숙박비·운임 별도 지급 없음(정액).")
 
-        st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다.")
+        st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다. "
+                "출장일자·성명은 그때 엑셀 추출에 사용됩니다.")
 
     # =========================================================
     # 관외 : 경로 → 유종/연비 → 단가 → 거리·운임 → 여비 산정
@@ -732,13 +759,21 @@ with tab2:
 
         # 관외 세부 입력
         hours_over_4 = True
-        e1, e2, e3 = st.columns(3)
+        e0, e1, e2, e3 = st.columns(4)
+        trip_start = e0.date_input("출장 시작일", value=date.today(),
+                                   help="엑셀 추출용. 종료일은 숙박 밤 수로 자동 계산됩니다.")
         days = e1.number_input("출장일수(일비·식비)", min_value=0, value=1, step=1)
         nights = e2.number_input("숙박 밤 수", min_value=0, value=0, step=1)
         sukbak_region_label = e3.selectbox(
             "숙박지역(상한)", list(SUKBAK_REGION.keys()),
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
+
+        # 종료일 = 시작일 + 숙박 밤 수 (0박이면 당일 = 시작일)
+        trip_end = trip_start + timedelta(days=int(nights))
+        st.caption(f"ⓘ 출장 기간: **{trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}** "
+                   f"({int(nights)}박 {int(days)}일) — 종료일은 숙박 밤 수로 자동 계산. "
+                   "엑셀 추출 시 시작일·종료일로 사용됩니다.")
 
         last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
         applied_dist = (last_km_oneway * trip_multiplier) if last_km_oneway is not None else None
