@@ -21,7 +21,7 @@ API 키는 .streamlit/secrets.toml (또는 Streamlit Cloud Secrets)에서 로드
 
 import io
 import time
-from datetime import date, timedelta
+from datetime import date
 import requests
 import pandas as pd
 import streamlit as st
@@ -473,42 +473,7 @@ with st.expander("🔑 API 연결 상태 확인 / 지오코딩 진단", expanded
         st.caption("여기서 뜨는 메시지가 실제 원인입니다. "
                    "401/403이면 카카오 앱 설정, 0건이면 주소 형식, 미설정이면 Secrets 문제입니다.")
 
-tab1, tab2, tab3 = st.tabs(["⛽ 유가 조회", "🧮 여비 계산", "📋 명단 일괄 처리"])
-
-# -------------------------------------------------------------
-# TAB 1 : 유가 조회
-# -------------------------------------------------------------
-with tab1:
-    st.subheader("오피넷 유가 조회")
-    view = st.radio("조회 범위", ["전국 평균", "시도별", "시군별"], horizontal=True)
-
-    if view == "전국 평균":
-        df = fetch_oil_price_nationwide()
-        if not df.empty:
-            st.dataframe(df, width="stretch")
-        else:
-            st.info("오피넷 API 키를 secrets에 설정하면 조회됩니다.")
-
-    elif view == "시도별":
-        df = fetch_oil_price_sido()
-        if not df.empty:
-            st.dataframe(df, width="stretch")
-        else:
-            st.info("오피넷 API 키를 secrets에 설정하면 조회됩니다.")
-
-    else:
-        cc1, cc2 = st.columns(2)
-        sido_name = cc1.selectbox("시도", list(OPINET_SIDO.keys()),
-                                  index=list(OPINET_SIDO.keys()).index("경북"))
-        prod_name = cc2.selectbox("유종", list(OPINET_PRODUCTS.keys()))
-        if st.button("시군별 조회"):
-            df = fetch_oil_price_sigun(OPINET_SIDO[sido_name], OPINET_PRODUCTS[prod_name])
-            if not df.empty:
-                st.dataframe(df, width="stretch")
-            else:
-                st.info("결과가 없거나 API 키가 설정되지 않았습니다.")
-
-    st.caption("※ 유가는 일 단위 갱신. 2개월치 누적은 별도 수집(GitHub Actions 등)으로 확장 예정.")
+tab2, tab3 = st.tabs(["🧮 여비 계산", "📋 명단 일괄 처리"])
 
 
 # -------------------------------------------------------------
@@ -597,6 +562,23 @@ with tab2:
     if use_car:
         st.caption("🚙 공무용 차량 이용 체크됨 → 관외: **운임·통행료 미지급**, 일비 1/2 자동 적용 · "
                    "관내: 정액 1만원 감액. (기름값·통행료는 기관 부담)")
+
+    # 직전 거리계산에서 관내 후보로 판정되면 세션에 신호가 남는다.
+    # 그 신호를 최상단(버튼 중첩 없는 위치)에서 안내 + 전환 버튼으로 처리 → rerun 안전.
+    if (not is_gwannae) and st.session_state.get("gwannae_candidate"):
+        why = st.session_state.get("gwannae_candidate_reason", "")
+        st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
+                   "같은 시·군 안이거나 여행거리 12km 미만이면 관내(정액)로 처리해야 할 수 있습니다.")
+        cb1, cb2 = st.columns([1, 4])
+        if cb1.button("→ 관내(정액)로 전환", key="switch_to_gwannae_top"):
+            st.session_state["force_gwannae"] = True
+            st.session_state.pop("gwannae_candidate", None)
+            st.session_state.pop("gwannae_candidate_reason", None)
+            st.rerun()
+        if cb2.button("관외로 계속 진행 (안내 닫기)", key="dismiss_gwannae_top"):
+            st.session_state.pop("gwannae_candidate", None)
+            st.session_state.pop("gwannae_candidate_reason", None)
+            st.rerun()
 
     st.markdown("---")
 
@@ -739,20 +721,24 @@ with tab2:
             oil_fuel = OIL_PRICE_FUEL_MAP.get(fuel_type, "휘발유")
             c6.text_input("유가 기준 유종", value=oil_fuel, disabled=True,
                           help="하이브리드·PHEV는 휘발유 유가를 기준으로 합니다.")
-            region = c7.selectbox("지역 기준", ["전국", "경북"],
-                                  help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요.")
+            region = c7.selectbox("지역 기준", ["경북", "전국"],
+                                  help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요. 기본값은 경북입니다.")
             if not hist.empty:
-                avail_dates = sorted(hist["날짜"].unique().tolist(), reverse=True)
+                avail_dates = sorted(hist["날짜"].unique().tolist())
             else:
                 avail_dates = []
             auto_price = None
+            sel_date = None
             if avail_dates:
-                sel_date = c8.selectbox("유가 기준일", avail_dates,
-                                        help="누적 수집된 날짜 중 선택. 최대 약 2개월치.")
+                dmin = date.fromisoformat(avail_dates[0])
+                dmax = date.fromisoformat(avail_dates[-1])
+                picked = c8.date_input("유가 기준일", value=dmax,
+                                       min_value=dmin, max_value=dmax,
+                                       help=f"유가 데이터 보유 범위: {avail_dates[0]} ~ {avail_dates[-1]}")
+                sel_date = picked.isoformat()
                 auto_price = lookup_oil_price(hist, sel_date, region, oil_fuel)
             else:
-                c8.selectbox("유가 기준일", ["(누적 데이터 없음)"], disabled=True)
-                sel_date = None
+                c8.date_input("유가 기준일", value=date.today(), disabled=True)
             default_price = auto_price if auto_price is not None else 0.0
             oil_price = c9.number_input("적용 유가(원/L)", min_value=0.0,
                                         value=float(default_price), step=1.0,
@@ -760,7 +746,8 @@ with tab2:
             if avail_dates and auto_price is not None:
                 st.caption(f"✅ {sel_date} · {region} · {oil_fuel} 유가 자동 적용: {auto_price:,.2f} 원/L")
             elif avail_dates and auto_price is None:
-                st.caption(f"⚠️ {sel_date} · {region} · {oil_fuel} 데이터가 없어 수기 입력이 필요합니다.")
+                st.caption(f"⚠️ {sel_date} · {region} · {oil_fuel} 데이터가 없어 수기 입력이 필요합니다. "
+                           "(주말·공휴일 등 수집 누락일일 수 있습니다.)")
             else:
                 st.caption("ⓘ 유가 누적 데이터가 아직 쌓이지 않았습니다. GitHub Actions가 매일 수집하며, "
                            "며칠 후부터 날짜 선택이 가능해집니다. 그전까지는 유가를 수기 입력하세요.")
@@ -772,20 +759,29 @@ with tab2:
 
         # 관외 세부 입력
         hours_over_4 = True
-        e0, e1, e2, e3 = st.columns(4)
+        e0, e1, e2 = st.columns([1.2, 1.2, 1])
         trip_start = e0.date_input("출장 시작일", value=date.today(),
-                                   help="엑셀 추출용. 종료일은 숙박 밤 수로 자동 계산됩니다.")
-        days = e1.number_input("출장일수(일비·식비)", min_value=0, value=1, step=1)
-        nights = e2.number_input("숙박 밤 수", min_value=0, value=0, step=1)
-        sukbak_region_label = e3.selectbox(
+                                   help="달력에서 출장 시작일을 고르세요.")
+        trip_end = e1.date_input("출장 종료일", value=date.today(),
+                                 help="달력에서 종료일을 고르세요. 당일치기면 시작일과 같게 두세요.")
+        sukbak_region_label = e2.selectbox(
             "숙박지역(상한)", list(SUKBAK_REGION.keys()),
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
 
-        # 종료일 = 시작일 + 숙박 밤 수 (0박이면 당일 = 시작일)
-        trip_end = trip_start + timedelta(days=int(nights))
+        # 종료일 < 시작일 방지
+        if trip_end < trip_start:
+            st.error("종료일이 시작일보다 빠릅니다. 날짜를 다시 확인하세요.")
+            trip_end = trip_start
+
+        # 여행일수·밤수 자동 계산
+        #   일비·식비 일수 = (종료일 - 시작일) + 1  (당일치기 = 1일)
+        #   숙박 밤 수     = (종료일 - 시작일)       (당일치기 = 0박)
+        span = (trip_end - trip_start).days
+        days = span + 1
+        nights = span
         st.caption(f"ⓘ 출장 기간: **{trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}** "
-                   f"({int(nights)}박 {int(days)}일) — 종료일은 숙박 밤 수로 자동 계산.")
+                   f"→ **{nights}박 {days}일** (일비·식비 {days}일分, 숙박 {nights}박分 자동 계산)")
 
         # 왕복 배수 결정: 기본 왕복 1회(×2). 단, 숙박 0박 + 일수 2일 이상이면 매일 출퇴근 → ×2×일수
         daily_commute = (int(nights) == 0 and int(days) >= 2)
@@ -843,15 +839,16 @@ with tab2:
                         st.session_state["last_dist_km_oneway"] = dist_km_oneway
                         st.session_state["last_toll_oneway"] = toll_oneway
 
-                        # 관내 자동판정 (제안만)
+                        # 관내 자동판정 (버튼은 최상단에서 처리 → 여기선 세션에 신호만 저장)
                         cand, why = check_gwannae_candidate(origin, dest, dist_km_oneway)
                         if cand:
-                            st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
-                                       "같은 시·군 안이거나 여행거리 12km 미만이면 관내(정액)로 "
-                                       "처리해야 할 수 있습니다. 아래 버튼으로 전환하거나, 관외 결과를 그대로 사용하세요.")
-                            if st.button("→ 관내(정액)로 전환", key="switch_to_gwannae"):
-                                st.session_state["force_gwannae"] = True
-                                st.rerun()
+                            st.session_state["gwannae_candidate"] = True
+                            st.session_state["gwannae_candidate_reason"] = why
+                            st.info(f"🏠 관내 출장 후보로 감지되었습니다 — {why}. "
+                                    "화면 맨 위의 안내에서 '관내(정액)로 전환'을 누를 수 있습니다.")
+                        else:
+                            st.session_state.pop("gwannae_candidate", None)
+                            st.session_state.pop("gwannae_candidate_reason", None)
 
                         # 왕복 주행거리
                         applied_dist = dist_km_oneway * round_multiplier
