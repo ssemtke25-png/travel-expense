@@ -816,8 +816,8 @@ with tab2:
             st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
 
         # 통행료: 이번에 받은 카카오 편도값 × 배수를 우선 사용.
-#         단 사용자가 입력칸을 직접 건드려 다른 값을 넣었으면 그 값 존중.
-auto_toll = toll_oneway * round_multiplier
+        # 단 사용자가 입력칸을 직접 건드려 다른 값을 넣었으면 그 값 존중.
+        auto_toll = toll_oneway * round_multiplier
         if int(toll_input) > 0:
             applied_toll = int(toll_input)   # 사용자가 수기로 넣은 값 우선
         else:
