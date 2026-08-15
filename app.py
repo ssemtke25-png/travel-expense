@@ -772,16 +772,10 @@ with tab2:
             "통행료(원, 왕복)", min_value=0, value=0, step=100,
             disabled=use_car,
             help="운전자가 실제 낸 통행료(왕복)를 직접 입력하세요. 하이패스 할인·경로 선택에 따라 "
-                 "사람마다 다르므로 자동값을 넣지 않습니다. 아래 계산 결과에 카카오 참고값이 표시됩니다. "
-                 "공무용 차량이면 통행료도 0으로 처리됩니다.")
+                 "사람마다 다르므로 직접 입력합니다. 입력한 값이 명세서 통행료행에 반영되어 "
+                 "계·청구액이 자동 재계산됩니다. 공무용 차량이면 통행료는 0으로 처리됩니다.")
         if use_car:
             st.caption("ⓘ 공무용 차량 이용이므로 운임·통행료는 계산에서 0 처리됩니다.")
-        else:
-            last_toll_ref = int(st.session_state.get("last_toll_oneway", 0))
-            if last_toll_ref > 0:
-                st.caption(f"ⓘ 참고: 직전 계산의 카카오 편도 통행료 {last_toll_ref:,}원 "
-                           f"(왕복 {last_toll_ref * round_multiplier:,}원). "
-                           f"실제 낸 금액이 다르면 위 칸에 직접 입력하세요.")
 
         st.markdown("---")
         if st.button("💰 여비 합계 계산", type="primary", key="calc_all"):
@@ -804,9 +798,7 @@ with tab2:
                         st.info("주소 인식은 정상입니다. 길찾기 승인 후 이 버튼만 다시 누르면 계산됩니다.")
                     else:
                         dist_km_oneway = route["distance_m"] / 1000
-                        toll_oneway = int(route["toll"])
                         st.session_state["last_dist_km_oneway"] = dist_km_oneway
-                        st.session_state["last_toll_oneway"] = toll_oneway
 
                         cand, why = check_gwannae_candidate(origin, dest, dist_km_oneway)
                         if cand:
@@ -817,7 +809,6 @@ with tab2:
                                       type="primary", on_click=_switch_to_gwannae)
 
                         applied_dist = dist_km_oneway * round_multiplier
-                        auto_toll = toll_oneway * round_multiplier  # 카카오 참고용(왕복)
                         # 통행료는 사용자 입력칸 값을 그대로 사용(운전자마다 실제 금액 상이).
                         applied_toll = int(toll_input)
 
@@ -828,9 +819,8 @@ with tab2:
                         m2.metric(f"적용거리(×{round_multiplier})", f"{applied_dist:,.1f} km")
                         m3.metric("통행료(입력값, 왕복)", f"{applied_toll:,} 원")
                         st.caption(f"경로 좌표 변환 ✓ (출발지:{o['method']} / 도착지:{d['method']}) · "
-                                   f"카카오 참고 통행료: 편도 {toll_oneway:,}원 × {round_multiplier} = {auto_toll:,}원 "
-                                   f"(실제 여비에는 위 입력칸의 {applied_toll:,}원 적용) · "
-                                   f"예상 소요(편도) {route['duration_s']//60}분")
+                                   f"예상 소요(편도) {route['duration_s']//60}분 · "
+                                   f"통행료는 위 입력칸에 직접 입력한 {applied_toll:,}원이 적용됩니다.")
 
                         res = calculate_travel_allowance(
                             is_gwannae=False,
