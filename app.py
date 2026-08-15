@@ -670,14 +670,40 @@ with tab2:
                    "일비·식비·숙박비는 전원 각자 지급됩니다.")
 
         # --- 3) 출장 목적 (운전자·동승자 공통 출력) ---
+        # --- 3) 출장 목적 (운전자·동승자 공통 출력) ---
         st.markdown("##### 3) 출장 목적")
         trip_purpose = st.text_input(
             "출장 목적", placeholder="예) ○○ 지적재조사 지구 현장 확인",
             help="운전자·동승자 모두 동일하게 출력됩니다. (실물 양식 확보 후 위치·문구 조정 예정)",
         )
 
-        # --- 4) 차량 유종 / 연비 ---
-        st.markdown("##### 4) 차량 유종 / 연비 (규정 표준값)")
+        # --- 4) 출장 기간 (시작일·종료일) ---
+        #   유가 기준일 = 출장 시작일 (규정/실무: 출발일 유가 적용).
+        #   시작일을 먼저 받아 아래 단가의 유가 기준일로 자동 연결한다.
+        st.markdown("##### 4) 출장 기간")
+        hours_over_4 = True
+        d0, d1 = st.columns(2)
+        trip_start = d0.date_input("출장 시작일", value=date.today(),
+                                   help="달력에서 출장 시작일을 고르세요. 이 날짜가 유가 기준일로 자동 적용됩니다.")
+        trip_end = d1.date_input("출장 종료일", value=date.today(),
+                                 help="달력에서 종료일을 고르세요. 당일치기면 시작일과 같게 두세요.")
+
+        # 종료일 < 시작일 방지
+        if trip_end < trip_start:
+            st.error("종료일이 시작일보다 빠릅니다. 날짜를 다시 확인하세요.")
+            trip_end = trip_start
+
+        # 여행일수·밤수 자동 계산
+        #   일비·식비 일수 = (종료일 - 시작일) + 1  (당일치기 = 1일)
+        #   숙박 밤 수     = (종료일 - 시작일)       (당일치기 = 0박)
+        span = (trip_end - trip_start).days
+        days = span + 1
+        nights = span
+        st.caption(f"ⓘ 출장 기간: **{trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}** "
+                   f"→ **{nights}박 {days}일** (일비·식비 {days}일分, 숙박 {nights}박分 자동 계산)")
+
+        # --- 5) 차량 유종 / 연비 ---
+        st.markdown("##### 5) 차량 유종 / 연비 (규정 표준값)")
         st.caption("「공무원 여비업무 처리기준(2023.1.18.)」 유종별 표준 연비를 기본값으로 적용합니다. "
                    "실측값이 있으면 수정하세요.")
         c3, c4 = st.columns(2)
@@ -693,8 +719,8 @@ with tab2:
                        f"전비 {PHEV_ELEC_EFF} km/kWh가 모두 제시됩니다. 기본은 연비 기준이며, "
                        f"전기 운행분으로 계산하려면 유종을 '전기'로 바꾸거나 위 값을 전비로 수정하세요.")
 
-        # --- 5) 단가 ---
-        st.markdown("##### 5) 단가 (유가 또는 전기요금)")
+        # --- 6) 단가 (유가 기준일 = 출장 시작일 자동) ---
+        st.markdown("##### 6) 단가 (유가 또는 전기요금)")
         hist = load_oil_history()
 
         if is_electric:
@@ -713,65 +739,38 @@ with tab2:
                           help="하이브리드·PHEV는 휘발유 유가를 기준으로 합니다.")
             region = c7.selectbox("지역 기준", ["경북", "전국"],
                                   help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요. 기본값은 경북입니다.")
+            # 유가 기준일 = 출장 시작일 (자동, 수정 불가 표시)
+            sel_date = trip_start.isoformat()
+            c8.text_input("유가 기준일 (= 출장 시작일)", value=sel_date, disabled=True,
+                          help="규정상 출장 시작일의 유가를 적용합니다. 위 '출장 시작일'을 바꾸면 자동으로 바뀝니다.")
+            auto_price = None
             if not hist.empty:
                 avail_dates = sorted(hist["날짜"].unique().tolist())
-            else:
-                avail_dates = []
-            auto_price = None
-            sel_date = None
-            if avail_dates:
-                dmin = date.fromisoformat(avail_dates[0])
-                dmax = date.fromisoformat(avail_dates[-1])
-                picked = c8.date_input("유가 기준일", value=dmax,
-                                       min_value=dmin, max_value=dmax,
-                                       help=f"유가 데이터 보유 범위: {avail_dates[0]} ~ {avail_dates[-1]}")
-                sel_date = picked.isoformat()
                 auto_price = lookup_oil_price(hist, sel_date, region, oil_fuel)
             else:
-                c8.date_input("유가 기준일", value=date.today(), disabled=True)
+                avail_dates = []
             default_price = auto_price if auto_price is not None else 0.0
             oil_price = c9.number_input("적용 유가(원/L)", min_value=0.0,
                                         value=float(default_price), step=1.0,
-                                        help="선택한 날짜·지역·유종의 오피넷 값이 자동 입력됩니다. 수정 가능.")
-            if avail_dates and auto_price is not None:
-                st.caption(f"✅ {sel_date} · {region} · {oil_fuel} 유가 자동 적용: {auto_price:,.2f} 원/L")
-            elif avail_dates and auto_price is None:
-                st.caption(f"⚠️ {sel_date} · {region} · {oil_fuel} 데이터가 없어 수기 입력이 필요합니다. "
-                           "(주말·공휴일 등 수집 누락일일 수 있습니다.)")
+                                        help="출장 시작일·지역·유종의 오피넷 값이 자동 입력됩니다. 수정 가능.")
+            if auto_price is not None:
+                st.caption(f"✅ {sel_date}(출장 시작일) · {region} · {oil_fuel} 유가 자동 적용: {auto_price:,.2f} 원/L")
+            elif avail_dates:
+                st.caption(f"⚠️ {sel_date}(출장 시작일) · {region} · {oil_fuel} 유가 데이터가 없어 수기 입력이 필요합니다. "
+                           f"(유가 보유 범위: {avail_dates[0]} ~ {avail_dates[-1]} · 주말·공휴일 등은 수집 누락일 수 있음)")
             else:
                 st.caption("ⓘ 유가 누적 데이터가 아직 쌓이지 않았습니다. GitHub Actions가 매일 수집하며, "
-                           "며칠 후부터 날짜 선택이 가능해집니다. 그전까지는 유가를 수기 입력하세요.")
+                           "며칠 후부터 자동 적용됩니다. 그전까지는 유가를 수기 입력하세요.")
 
-        # --- 6) 여비 산정 입력 ---
-        st.markdown("##### 6) 여비 산정 입력")
+        # --- 7) 여비 산정 입력 (숙박지역·운임·통행료) ---
+        st.markdown("##### 7) 여비 산정 입력")
         st.caption("「공무원 여비 규정」 준용. 단가는 상단 ALLOWANCE_RATES 기본값(국가 규정)입니다. "
                    "경상북도 별도 조례가 없어 국가 규정을 그대로 적용합니다. 운임은 왕복(편도×2)으로 계산합니다.")
 
-        # 관외 세부 입력
-        hours_over_4 = True
-        e0, e1, e2 = st.columns([1.2, 1.2, 1])
-        trip_start = e0.date_input("출장 시작일", value=date.today(),
-                                   help="달력에서 출장 시작일을 고르세요.")
-        trip_end = e1.date_input("출장 종료일", value=date.today(),
-                                 help="달력에서 종료일을 고르세요. 당일치기면 시작일과 같게 두세요.")
-        sukbak_region_label = e2.selectbox(
+        sukbak_region_label = st.selectbox(
             "숙박지역(상한)", list(SUKBAK_REGION.keys()),
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
-
-        # 종료일 < 시작일 방지
-        if trip_end < trip_start:
-            st.error("종료일이 시작일보다 빠릅니다. 날짜를 다시 확인하세요.")
-            trip_end = trip_start
-
-        # 여행일수·밤수 자동 계산
-        #   일비·식비 일수 = (종료일 - 시작일) + 1  (당일치기 = 1일)
-        #   숙박 밤 수     = (종료일 - 시작일)       (당일치기 = 0박)
-        span = (trip_end - trip_start).days
-        days = span + 1
-        nights = span
-        st.caption(f"ⓘ 출장 기간: **{trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}** "
-                   f"→ **{nights}박 {days}일** (일비·식비 {days}일分, 숙박 {nights}박分 자동 계산)")
 
         # 왕복 배수 결정: 기본 왕복 1회(×2). 단, 숙박 0박 + 일수 2일 이상이면 매일 출퇴근 → ×2×일수
         daily_commute = (int(nights) == 0 and int(days) >= 2)
