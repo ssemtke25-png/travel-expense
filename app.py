@@ -297,7 +297,10 @@ def geocode_full(address: str) -> dict:
     """일괄처리용: 좌표와 실패사유를 함께 반환(캐시)."""
     return geocode_debug(address)
 
-@st.cache_data(ttl=86400)
+
+# 주의: 통행료 파라미터(car_hipass 등)를 바꾼 뒤에도 이전 캐시값이 남아
+#       옛 통행료가 계속 반환되는 문제가 있어, 이 함수는 캐시를 걸지 않는다.
+#       (길찾기 호출은 계산 버튼을 누를 때만 1회 발생하므로 부담이 적음.)
 def get_road_distance(origin_xy, dest_xy):
     """좌표 → 도로 주행거리(m, 편도), 소요시간(s), 통행료(원, 편도)."""
     if not KAKAO_REST_KEY:
@@ -309,8 +312,8 @@ def get_road_distance(origin_xy, dest_xy):
         "origin": f"{origin_xy[0]},{origin_xy[1]}",
         "destination": f"{dest_xy[0]},{dest_xy[1]}",
         "priority": "RECOMMEND",
-        "car_fuel": "GASOLINE",   # ← 추가
-        "car_hipass": "false",    # ← 추가 (하이패스 미할인 정상 통행료)
+        "car_fuel": "GASOLINE",
+        "car_hipass": "false",    # 하이패스 미할인 정상 통행료 기준
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
@@ -327,7 +330,6 @@ def get_road_distance(origin_xy, dest_xy):
         }
     except Exception as e:
         return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
-
 
 
 # =============================================================
@@ -680,7 +682,6 @@ with tab2:
                    "일비·식비·숙박비는 전원 각자 지급됩니다.")
 
         # --- 3) 출장 목적 (운전자·동승자 공통 출력) ---
-        # --- 3) 출장 목적 (운전자·동승자 공통 출력) ---
         st.markdown("##### 3) 출장 목적")
         trip_purpose = st.text_input(
             "출장 목적", placeholder="예) ○○ 지적재조사 지구 현장 확인",
@@ -813,7 +814,12 @@ with tab2:
             st.caption(f"🚗 숙박 없이 {int(days)}일 출장 → **매일 출퇴근**으로 보아 운임·통행료를 "
                        f"편도 × 2(왕복) × {int(days)}일 = **×{round_multiplier}**로 계산합니다.")
         else:
-            st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")  
+            st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
+
+        # 통행료: 직전 계산에서 받은 카카오 편도값 × 왕복배수를 입력칸 기본값으로.
+        #   (이 두 변수는 아래 통행료 입력칸과 안내문에서 사용되므로 반드시 여기서 정의)
+        last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
+        applied_toll_default = last_toll_oneway * round_multiplier
 
         manual_transport = st.number_input(
             "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
@@ -832,7 +838,7 @@ with tab2:
             st.caption(f"ⓘ 통행료 기본값 {applied_toll_default:,} 원 "
                        f"(직전 계산 편도 {last_toll_oneway:,} × {round_multiplier})")
 
-        # --- 7) 여비 합계 계산 (거리→운임→여비 한 번에) ---
+        # --- 여비 합계 계산 (거리→운임→여비 한 번에) ---
         st.markdown("---")
         if st.button("💰 여비 합계 계산", type="primary", key="calc_all"):
             if not origin or not dest:
@@ -870,9 +876,12 @@ with tab2:
                         # 왕복 주행거리
                         applied_dist = dist_km_oneway * round_multiplier
                         # 통행료: 이번에 받은 카카오 편도값 × 배수를 자동 반영(첫 실행부터).
-                        #         단 사용자가 입력칸을 직접 고쳐 넣었으면 그 값을 존중.
+                        #   단 사용자가 통행료 입력칸을 직접 고쳐 넣었으면(=자동 기본값과 다르면) 그 값을 존중.
                         auto_toll = toll_oneway * round_multiplier
-                        applied_toll = int(toll_input) if int(toll_input) > 0 else auto_toll
+                        if int(toll_input) > 0 and int(toll_input) != int(applied_toll_default):
+                            applied_toll = int(toll_input)   # 사용자가 수기로 바꾼 값
+                        else:
+                            applied_toll = auto_toll          # 자동 계산값
 
                         # 자가차 유류/전기비
                         fuel_cost_val = calc_fuel_cost(applied_dist, eff, oil_price)
@@ -883,6 +892,7 @@ with tab2:
                         m2.metric(f"적용거리(×{round_multiplier})", f"{applied_dist:,.1f} km")
                         m3.metric("통행료(왕복)", f"{applied_toll:,} 원")
                         st.caption(f"경로 좌표 변환 ✓ (출발지:{o['method']} / 도착지:{d['method']}) · "
+                                   f"편도 통행료 {toll_oneway:,}원 × {round_multiplier} = {auto_toll:,}원 · "
                                    f"예상 소요(편도) {route['duration_s']//60}분")
 
                         # 여비 산출
