@@ -297,7 +297,6 @@ def geocode_full(address: str) -> dict:
     """일괄처리용: 좌표와 실패사유를 함께 반환(캐시)."""
     return geocode_debug(address)
 
-
 @st.cache_data(ttl=86400)
 def get_road_distance(origin_xy, dest_xy):
     """좌표 → 도로 주행거리(m, 편도), 소요시간(s), 통행료(원, 편도)."""
@@ -310,6 +309,8 @@ def get_road_distance(origin_xy, dest_xy):
         "origin": f"{origin_xy[0]},{origin_xy[1]}",
         "destination": f"{dest_xy[0]},{dest_xy[1]}",
         "priority": "RECOMMEND",
+        "car_fuel": "GASOLINE",   # ← 추가
+        "car_hipass": "false",    # ← 추가 (하이패스 미할인 정상 통행료)
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
@@ -326,6 +327,7 @@ def get_road_distance(origin_xy, dest_xy):
         }
     except Exception as e:
         return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
+
 
 
 # =============================================================
