@@ -290,7 +290,8 @@ def get_road_distance(origin_xy, dest_xy):
         "destination": f"{dest_xy[0]},{dest_xy[1]}",
         "priority": "RECOMMEND",
         "car_fuel": "GASOLINE",
-        "car_hipass": "false",
+        "car_hipass": "true",       # 하이패스 기준(카카오맵 웹 기본과 일치)
+        "alternatives": "true",     # 대안경로 여러 개 받기 → 통행료 최저 선택
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
@@ -298,12 +299,24 @@ def get_road_distance(origin_xy, dest_xy):
             return {"ok": False, "reason": "길찾기 API 사용 권한이 아직 승인되지 않았습니다. "
                                            "카카오 데브톡 승인 후 자동으로 작동합니다."}
         r.raise_for_status()
-        summary = r.json()["routes"][0]["summary"]
+        routes = r.json().get("routes", [])
+        # result_code != 0 인 경로는 제외(길찾기 실패 경로)
+        valid = [rt for rt in routes if rt.get("result_code", 0) == 0 and "summary" in rt]
+        if not valid:
+            valid = [rt for rt in routes if "summary" in rt]
+        if not valid:
+            return {"ok": False, "reason": "경로를 찾지 못했습니다."}
+        # 통행료 최저 경로 선택 (동일하면 거리 짧은 쪽)
+        def _toll(rt):
+            return rt["summary"].get("fare", {}).get("toll", 0)
+        best = min(valid, key=lambda rt: (_toll(rt), rt["summary"].get("distance", 0)))
+        summary = best["summary"]
         return {
             "ok": True,
             "distance_m": summary["distance"],
             "duration_s": summary["duration"],
             "toll": summary.get("fare", {}).get("toll", 0),
+            "n_routes": len(valid),
         }
     except Exception as e:
         return {"ok": False, "reason": f"길찾기 호출 오류: {e}"}
@@ -732,9 +745,6 @@ with tab2:
         else:
             st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
 
-        last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
-        applied_toll_default = last_toll_oneway * round_multiplier
-
         manual_transport = st.number_input(
             "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
             disabled=use_car,
@@ -742,15 +752,19 @@ with tab2:
                  "KTX·버스 등 대중교통이면 실비를 입력하세요. "
                  "공무용 차량이면 운임은 0으로 처리되어 입력이 비활성화됩니다.")
         toll_input = st.number_input(
-            "통행료(원, 왕복)", min_value=0, value=int(applied_toll_default), step=100,
+            "통행료(원, 왕복)", min_value=0, value=0, step=100,
             disabled=use_car,
-            help="카카오 편도 통행료 × 왕복배수 값이 자동 입력됩니다. 국도 이용·하이패스 할인 등으로 다르면 수정(국도면 0). "
+            help="운전자가 실제 낸 통행료(왕복)를 직접 입력하세요. 하이패스 할인·경로 선택에 따라 "
+                 "사람마다 다르므로 자동값을 넣지 않습니다. 아래 계산 결과에 카카오 참고값이 표시됩니다. "
                  "공무용 차량이면 통행료도 0으로 처리됩니다.")
         if use_car:
             st.caption("ⓘ 공무용 차량 이용이므로 운임·통행료는 계산에서 0 처리됩니다.")
-        elif last_toll_oneway > 0:
-            st.caption(f"ⓘ 통행료 기본값 {applied_toll_default:,} 원 "
-                       f"(직전 계산 편도 {last_toll_oneway:,} × {round_multiplier})")
+        else:
+            last_toll_ref = int(st.session_state.get("last_toll_oneway", 0))
+            if last_toll_ref > 0:
+                st.caption(f"ⓘ 참고: 직전 계산의 카카오 편도 통행료 {last_toll_ref:,}원 "
+                           f"(왕복 {last_toll_ref * round_multiplier:,}원). "
+                           f"실제 낸 금액이 다르면 위 칸에 직접 입력하세요.")
 
         st.markdown("---")
         if st.button("💰 여비 합계 계산", type="primary", key="calc_all"):
@@ -786,20 +800,19 @@ with tab2:
                                       type="primary", on_click=_switch_to_gwannae)
 
                         applied_dist = dist_km_oneway * round_multiplier
-                        auto_toll = toll_oneway * round_multiplier
-                        if int(toll_input) > 0 and int(toll_input) != int(applied_toll_default):
-                            applied_toll = int(toll_input)
-                        else:
-                            applied_toll = auto_toll
+                        auto_toll = toll_oneway * round_multiplier  # 카카오 참고용(왕복)
+                        # 통행료는 사용자 입력칸 값을 그대로 사용(운전자마다 실제 금액 상이).
+                        applied_toll = int(toll_input)
 
                         fuel_cost_val = calc_fuel_cost(applied_dist, eff, oil_price)
 
                         m1, m2, m3 = st.columns(3)
                         m1.metric("도로거리(편도)", f"{dist_km_oneway:,.1f} km")
                         m2.metric(f"적용거리(×{round_multiplier})", f"{applied_dist:,.1f} km")
-                        m3.metric("통행료(왕복)", f"{applied_toll:,} 원")
+                        m3.metric("통행료(입력값, 왕복)", f"{applied_toll:,} 원")
                         st.caption(f"경로 좌표 변환 ✓ (출발지:{o['method']} / 도착지:{d['method']}) · "
-                                   f"편도 통행료 {toll_oneway:,}원 × {round_multiplier} = {auto_toll:,}원 · "
+                                   f"카카오 참고 통행료: 편도 {toll_oneway:,}원 × {round_multiplier} = {auto_toll:,}원 "
+                                   f"(실제 여비에는 위 입력칸의 {applied_toll:,}원 적용) · "
                                    f"예상 소요(편도) {route['duration_s']//60}분")
 
                         res = calculate_travel_allowance(
