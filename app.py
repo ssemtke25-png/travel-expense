@@ -813,15 +813,7 @@ with tab2:
             st.caption(f"🚗 숙박 없이 {int(days)}일 출장 → **매일 출퇴근**으로 보아 운임·통행료를 "
                        f"편도 × 2(왕복) × {int(days)}일 = **×{round_multiplier}**로 계산합니다.")
         else:
-            st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
-
-        # 통행료: 이번에 받은 카카오 편도값 × 배수를 우선 사용.
-        # 단 사용자가 입력칸을 직접 건드려 다른 값을 넣었으면 그 값 존중.
-        auto_toll = toll_oneway * round_multiplier
-        if int(toll_input) > 0:
-            applied_toll = int(toll_input)   # 사용자가 수기로 넣은 값 우선
-        else:
-            applied_toll = auto_toll          # 입력칸이 0이면 방금 받은 카카오값 자동 적용
+            st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")  
 
         manual_transport = st.number_input(
             "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
@@ -877,8 +869,10 @@ with tab2:
 
                         # 왕복 주행거리
                         applied_dist = dist_km_oneway * round_multiplier
-                        # 통행료: 사용자가 입력한 값 사용. (기본값은 편도×배수였음)
-                        applied_toll = int(toll_input)
+                        # 통행료: 이번에 받은 카카오 편도값 × 배수를 자동 반영(첫 실행부터).
+                        #         단 사용자가 입력칸을 직접 고쳐 넣었으면 그 값을 존중.
+                        auto_toll = toll_oneway * round_multiplier
+                        applied_toll = int(toll_input) if int(toll_input) > 0 else auto_toll
 
                         # 자가차 유류/전기비
                         fuel_cost_val = calc_fuel_cost(applied_dist, eff, oil_price)
