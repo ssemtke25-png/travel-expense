@@ -815,9 +815,13 @@ with tab2:
         else:
             st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
 
-        # 통행료: 카카오 편도값이 있으면 왕복배수 적용을 기본값으로, 수정 가능
-        last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
-        applied_toll_default = last_toll_oneway * round_multiplier
+        # 통행료: 이번에 받은 카카오 편도값 × 배수를 우선 사용.
+#         단 사용자가 입력칸을 직접 건드려 다른 값을 넣었으면 그 값 존중.
+auto_toll = toll_oneway * round_multiplier
+        if int(toll_input) > 0:
+            applied_toll = int(toll_input)   # 사용자가 수기로 넣은 값 우선
+        else:
+            applied_toll = auto_toll          # 입력칸이 0이면 방금 받은 카카오값 자동 적용
 
         manual_transport = st.number_input(
             "운임(대중교통 등, 원) — 비우면 자가차 유류/전기비 사용", min_value=0, value=0, step=1000,
