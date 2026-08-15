@@ -608,6 +608,14 @@ with tab2:
                 num_passengers=int(num_pax),
             )
             st.markdown(f"**구분: {res['구분']}** · 출장일자: {trip_date_g:%Y-%m-%d}")
+            if use_car:
+                st.markdown(
+                    """<div style="background:#fff4e5;border:2px solid #f39c12;border-radius:8px;
+                    padding:10px 14px;margin:6px 0;">
+                    🚙 <b>공무용 차량 이용</b> → 관내 정액에서 <b style="color:#c0392b;">1만원 감액</b> 적용됨
+                    (기름값·통행료는 기관 부담)</div>""",
+                    unsafe_allow_html=True,
+                )
             st.markdown(f"**🚗 운전자: {driver_name or '(성명 미입력)'}** → {res['운전자정액']:,} 원")
             if res["동승자수"] > 0:
                 st.markdown(f"**🧑‍🤝‍🧑 동승자 {res['동승자수']}명** (1인당 {res['동승자정액']:,} 원)")
@@ -892,6 +900,14 @@ with tab2:
                         )
 
                         st.markdown(f"**구분: {res['구분']}** · 목적: {trip_purpose or '(미입력)'}")
+                        if use_car:
+                            st.markdown(
+                                """<div style="background:#fff4e5;border:2px solid #f39c12;border-radius:8px;
+                                padding:10px 14px;margin:6px 0;">
+                                🚙 <b>공무용 차량 이용</b> → <b style="color:#c0392b;">운임·통행료 0원</b>,
+                                <b style="color:#c0392b;">일비 1/2 감액</b> 적용됨 (기름값·통행료는 기관 부담)</div>""",
+                                unsafe_allow_html=True,
+                            )
                         drv = res["운전자"]
                         st.markdown(f"**🚗 운전자: {driver_name or '(성명 미입력)'}**")
                         cc = st.columns(6)
