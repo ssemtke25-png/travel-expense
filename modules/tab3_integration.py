@@ -30,7 +30,7 @@ import pandas as pd
 import streamlit as st
 
 # ⬇️ 실제 배포 시: from modules.travel_expense_excel import ...
-from travel_expense_excel import (
+from modules.travel_expense_excel import (
     Person, Group, FUEL_STANDARDS,
     build_workbook, workbook_to_bytes,
     get_road_distance_waypoints,
