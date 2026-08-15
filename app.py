@@ -683,13 +683,12 @@ with tab2:
         st.markdown("##### 4) 출장 기간")
         hours_over_4 = True
 
-        # 종료일 자동 연동: 시작일을 바꾸면, 종료일이 시작일보다 앞서 있을 때만 시작일로 맞춘다.
-        #   → 당일치기는 시작일만 누르면 종료일이 자동으로 같은 날이 되고,
-        #     1박 이상은 종료일을 뒤로 조정하면 그대로 유지된다.
+        # 종료일 자동 연동: 시작일을 바꾸면 종료일을 항상 시작일로 초기화(당일치기 기본).
+        #   → 대부분 당일 출장이므로 시작일만 누르면 종료일이 같은 날로 맞춰지고,
+        #     1박 이상일 때만 종료일을 뒤로 조정하면 된다.
         def _sync_end_date():
             s = st.session_state.get("trip_start_key")
-            e = st.session_state.get("trip_end_key")
-            if s is not None and (e is None or e < s):
+            if s is not None:
                 st.session_state["trip_end_key"] = s
 
         if "trip_start_key" not in st.session_state:
@@ -700,11 +699,11 @@ with tab2:
         d0, d1 = st.columns(2)
         trip_start = d0.date_input(
             "출장 시작일", key="trip_start_key", on_change=_sync_end_date,
-            help="달력에서 출장 시작일을 고르세요. 종료일이 자동으로 같은 날로 맞춰집니다(당일치기 기본). "
+            help="달력에서 출장 시작일을 고르세요. 종료일이 자동으로 같은 날로 초기화됩니다(당일치기 기본). "
                  "이 날짜가 유가 기준일로도 자동 적용됩니다.")
         trip_end = d1.date_input(
             "출장 종료일", key="trip_end_key",
-            help="당일치기면 그대로 두세요. 1박 이상이면 종료일만 뒤로 조정하세요.")
+            help="당일치기면 그대로 두세요. 1박 이상이면 시작일을 먼저 고른 뒤 종료일만 뒤로 조정하세요.")
 
         # 종료일 < 시작일 방지 (콜백 이후에도 안전장치)
         if trip_end < trip_start:
