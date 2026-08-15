@@ -152,6 +152,13 @@ def check_gwannae_candidate(origin: str, dest: str, dist_km_oneway):
     return (len(reasons) > 0, " · ".join(reasons))
 
 
+def _switch_to_gwannae():
+    """관내 전환 버튼 콜백. 콜백은 재실행 사이클 앞단에서 실행돼 DOM 충돌이 없다."""
+    st.session_state["force_gwannae"] = True
+    st.session_state.pop("gwannae_candidate", None)
+    st.session_state.pop("gwannae_candidate_reason", None)
+
+
 # =============================================================
 # 데이터 로드
 # =============================================================
@@ -563,23 +570,6 @@ with tab2:
         st.caption("🚙 공무용 차량 이용 체크됨 → 관외: **운임·통행료 미지급**, 일비 1/2 자동 적용 · "
                    "관내: 정액 1만원 감액. (기름값·통행료는 기관 부담)")
 
-    # 직전 거리계산에서 관내 후보로 판정되면 세션에 신호가 남는다.
-    # 그 신호를 최상단(버튼 중첩 없는 위치)에서 안내 + 전환 버튼으로 처리 → rerun 안전.
-    if (not is_gwannae) and st.session_state.get("gwannae_candidate"):
-        why = st.session_state.get("gwannae_candidate_reason", "")
-        st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
-                   "같은 시·군 안이거나 여행거리 12km 미만이면 관내(정액)로 처리해야 할 수 있습니다.")
-        cb1, cb2 = st.columns([1, 4])
-        if cb1.button("→ 관내(정액)로 전환", key="switch_to_gwannae_top"):
-            st.session_state["force_gwannae"] = True
-            st.session_state.pop("gwannae_candidate", None)
-            st.session_state.pop("gwannae_candidate_reason", None)
-            st.rerun()
-        if cb2.button("관외로 계속 진행 (안내 닫기)", key="dismiss_gwannae_top"):
-            st.session_state.pop("gwannae_candidate", None)
-            st.session_state.pop("gwannae_candidate_reason", None)
-            st.rerun()
-
     st.markdown("---")
 
     # =========================================================
@@ -842,13 +832,11 @@ with tab2:
                         # 관내 자동판정 (버튼은 최상단에서 처리 → 여기선 세션에 신호만 저장)
                         cand, why = check_gwannae_candidate(origin, dest, dist_km_oneway)
                         if cand:
-                            st.session_state["gwannae_candidate"] = True
-                            st.session_state["gwannae_candidate_reason"] = why
-                            st.info(f"🏠 관내 출장 후보로 감지되었습니다 — {why}. "
-                                    "화면 맨 위의 안내에서 '관내(정액)로 전환'을 누를 수 있습니다.")
-                        else:
-                            st.session_state.pop("gwannae_candidate", None)
-                            st.session_state.pop("gwannae_candidate_reason", None)
+                            st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
+                                       "같은 시·군 안이거나 여행거리 12km 미만이면 관내(정액)로 "
+                                       "처리해야 할 수 있습니다. 아래 버튼으로 전환하거나, 관외 결과를 그대로 사용하세요.")
+                            st.button("→ 관내(정액)로 전환", key="switch_to_gwannae",
+                                      type="primary", on_click=_switch_to_gwannae)
 
                         # 왕복 주행거리
                         applied_dist = dist_km_oneway * round_multiplier
