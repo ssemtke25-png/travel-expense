@@ -8,7 +8,7 @@
                          → 규정 표준 연비/전비 → 유류비(왕복),
                          그 위에 일비·식비·숙박비·통행료 구조
                          + 관내 자동판정(호명읍 특례 + 12km) — 제안 후 사용자 전환
-  3) 일괄 처리 탭      : 출장자 명단 엑셀 업로드 → 전원 계산 → 엑셀 다운로드
+  3) 일괄 처리 탭      : 출장자 명단 엑셀 업로드 → 전원 계산 → 여비 지급명세서 엑셀 출력
 
 설계 원칙
   - 저장 기능 없음 (세션 동안만 유지). 개인정보 서버 미보관.
@@ -22,6 +22,12 @@ API 키는 .streamlit/secrets.toml (또는 Streamlit Cloud Secrets)에서 로드
 import io
 import time
 from datetime import date
+from modules.travel_expense_excel import (
+    Person, Group,
+    build_workbook, workbook_to_bytes,
+    get_road_distance_waypoints,
+)
+from modules.tab3_integration import render_tab3
 import requests
 import pandas as pd
 import streamlit as st
@@ -42,32 +48,20 @@ OPINET_KEY = _get_secret("OPINET_KEY")          # 오피넷 무료 API 키
 KAKAO_REST_KEY = _get_secret("KAKAO_REST_KEY")  # 카카오 REST API 키 (지오코딩+길찾기 공용)
 
 # ---- 여비 단가 ----
-# 근거: 「공무원 여비 규정」(대통령령) 별표2 및 제18조.
-# 지방공무원은 제29조의2에 따라 "해당 지방자치단체 여비 조례"가 우선 적용됨.
-#   → 대부분 지자체가 국가 별표2 금액을 그대로 준용하나,
-#     아래 값은 반드시 경상북도 여비 조례 별표로 최종 확인해 교체할 것.
-# 아래는 국가 규정 기준 기본값(교체 전 임시값).
 ALLOWANCE_RATES = {
-    "일비_1일": 25000,          # 별표2: 1일 25,000원
-    "식비_1일": 25000,          # 별표2: 1일 25,000원 (국내는 정액)
-    # 숙박비 상한은 지역별 상이(실비 정산, 상한 이내)
+    "일비_1일": 25000,
+    "식비_1일": 25000,
     "숙박비_상한_서울": 100000,
     "숙박비_상한_광역시": 80000,
     "숙박비_상한_그밖": 70000,
-    # 근무지 내(관내) 국내출장 정액 — 제18조
-    "관내_4시간이상": 20000,     # 4시간 이상 2만원
-    "관내_4시간미만": 10000,     # 4시간 미만 1만원
-    "관내_공무용차량감액": 10000,  # 공무용 차량 이용 시 1만원 감액
-    # 관내 출장 판정 거리 기준(km) — 제18조 제2항 제2호
+    "관내_4시간이상": 20000,
+    "관내_4시간미만": 10000,
+    "관내_공무용차량감액": 10000,
     "관내_거리기준_km": 12.0,
 }
 
 # ---- 유종별 표준 연비/전비 ----
-# 근거: 「공무원 여비업무 처리기준 변경사항 안내」(2023.1.18.)
-#       "가. 국내자동차운임 지급 기준 현행화 — 승용차 유종별 연비(전비)기준 세분화"
-# unit:
-#   "km/L"  → 유류비 = 왕복거리 ÷ 연비 × 유가(원/L)
-#   "km/kWh"→ 전기료 = 왕복거리 ÷ 전비 × 전기요금(원/kWh)
+# (modules.travel_expense_excel 에도 동일 정의가 있으나, app.py 단건 계산용으로 여기 유지)
 FUEL_STANDARDS = {
     "휘발유":            {"eff": 11.97, "unit": "km/L"},
     "경유":              {"eff": 12.52, "unit": "km/L"},
@@ -76,7 +70,7 @@ FUEL_STANDARDS = {
     "플러그인하이브리드":  {"eff": 10.61, "unit": "km/L"},
     "전기":              {"eff": 5.22,  "unit": "km/kWh"},
 }
-PHEV_ELEC_EFF = 2.84  # 플러그인하이브리드 전비(참고용)
+PHEV_ELEC_EFF = 2.84
 
 DEFAULT_ELEC_PRICE = 300.0
 
@@ -119,11 +113,10 @@ KAKAO_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
 # =============================================================
 # 관내 자동판정 (호명읍 특례 + 12km) — 제안용
 # =============================================================
-DOCHEONG_ADDR = "경상북도 안동시 풍천면 도청대로 455"  # 경상북도청
+DOCHEONG_ADDR = "경상북도 안동시 풍천면 도청대로 455"
 
 
 def is_from_docheong(origin: str) -> bool:
-    """출발지가 경북도청인지 대략 판정(핵심어 포함 여부)."""
     if not origin:
         return False
     o = origin.replace(" ", "")
@@ -131,20 +124,11 @@ def is_from_docheong(origin: str) -> bool:
 
 
 def check_gwannae_candidate(origin: str, dest: str, dist_km_oneway):
-    """
-    관내 후보 판정 (자동전환 X, 제안용).
-    기준:
-      1) 출발지=도청 AND 도착지에 '예천군 호명읍' 포함  → 호명읍 특례
-      2) 편도거리 < 12km                                 → 거리 기준
-    반환: (is_candidate: bool, reason: str)
-    """
     reasons = []
     dest_c = (dest or "").replace(" ", "")
     if is_from_docheong(origin):
-        # 도청 소재지(안동시)는 항상 관내
         if "안동시" in dest_c:
             reasons.append("도청 출발 + 안동시(도청 소재지, 관내)")
-        # 예천군 호명읍 관내 특례
         if "예천군호명읍" in dest_c or "호명읍" in dest_c:
             reasons.append("도청 출발 + 예천군 호명읍(관내 특례)")
     if dist_km_oneway is not None and dist_km_oneway < ALLOWANCE_RATES["관내_거리기준_km"]:
@@ -153,7 +137,6 @@ def check_gwannae_candidate(origin: str, dest: str, dist_km_oneway):
 
 
 def _switch_to_gwannae():
-    """관내 전환 버튼 콜백. 콜백은 재실행 사이클 앞단에서 실행돼 DOM 충돌이 없다."""
     st.session_state["force_gwannae"] = True
     st.session_state.pop("gwannae_candidate", None)
     st.session_state.pop("gwannae_candidate_reason", None)
@@ -164,7 +147,6 @@ def _switch_to_gwannae():
 # =============================================================
 @st.cache_data(ttl=1800)
 def load_oil_history() -> pd.DataFrame:
-    """유가 누적 CSV 로드. 없으면 빈 DataFrame."""
     try:
         df = pd.read_csv("data/oil_history.csv")
         df["날짜"] = df["날짜"].astype(str)
@@ -294,15 +276,10 @@ def geocode(address: str):
 
 @st.cache_data(ttl=86400)
 def geocode_full(address: str) -> dict:
-    """일괄처리용: 좌표와 실패사유를 함께 반환(캐시)."""
     return geocode_debug(address)
 
 
-# 주의: 통행료 파라미터(car_hipass 등)를 바꾼 뒤에도 이전 캐시값이 남아
-#       옛 통행료가 계속 반환되는 문제가 있어, 이 함수는 캐시를 걸지 않는다.
-#       (길찾기 호출은 계산 버튼을 누를 때만 1회 발생하므로 부담이 적음.)
 def get_road_distance(origin_xy, dest_xy):
-    """좌표 → 도로 주행거리(m, 편도), 소요시간(s), 통행료(원, 편도)."""
     if not KAKAO_REST_KEY:
         return {"ok": False, "reason": "카카오 키가 설정되지 않았습니다."}
     if not origin_xy or not dest_xy:
@@ -313,7 +290,7 @@ def get_road_distance(origin_xy, dest_xy):
         "destination": f"{dest_xy[0]},{dest_xy[1]}",
         "priority": "RECOMMEND",
         "car_fuel": "GASOLINE",
-        "car_hipass": "false",    # 하이패스 미할인 정상 통행료 기준
+        "car_hipass": "false",
     }
     try:
         r = requests.get(KAKAO_DIRECTIONS_URL, headers=headers, params=params, timeout=10)
@@ -336,7 +313,6 @@ def get_road_distance(origin_xy, dest_xy):
 # 계산 로직
 # =============================================================
 def floor10(value) -> int:
-    """십원 미만 버림(일의 자리 절사). 예: 1,863 → 1,860, 25,000 → 25,000."""
     try:
         return (int(value) // 10) * 10
     except (TypeError, ValueError):
@@ -344,7 +320,6 @@ def floor10(value) -> int:
 
 
 def calc_fuel_cost(distance_km: float, efficiency: float, unit_price: float) -> float:
-    """운행비 = 거리 ÷ 연비(전비) × 단가. distance_km 에는 최종 주행거리를 넣는다."""
     if efficiency <= 0:
         return 0.0
     return (distance_km / efficiency) * unit_price
@@ -361,19 +336,8 @@ def calculate_travel_allowance(
     fuel_cost: float,
     manual_transport: float,
     toll: float = 0.0,
-    num_passengers: int = 0,   # 동승자 수 (운전자 제외)
+    num_passengers: int = 0,
 ) -> dict:
-    """
-    「공무원 여비 규정」 준용 여비 산출 (운전자 + 동승자 분리).
-
-    운전자: 운임 + 일비 + 식비 + 숙박비 + 통행료
-    동승자: 일비 + 식비 + 숙박비 (운임·통행료 없음 — 같은 차 이용)
-      * 관내 정액 출장은 동승자 개념을 적용하지 않음(정액 1인 기준).
-
-    반환:
-      - 관내: {구분, 관내정액, 합계}
-      - 관외: {구분, 운전자:{...}, 동승자단가:{...}, 동승자수, 동승자합계, 총합계}
-    """
     result = {}
 
     if is_gwannae:
@@ -382,49 +346,43 @@ def calculate_travel_allowance(
         if use_official_car:
             base = max(0, base - ALLOWANCE_RATES["관내_공무용차량감액"])
         base = floor10(base)
-        # 관내는 정액. 운전자·동승자 모두 동일 금액(감액도 동일 적용).
         pax_n = max(0, int(num_passengers))
         result.update({
             "구분": "근무지 내(관내)",
-            "관내정액": base,          # 1인 정액(하위호환)
+            "관내정액": base,
             "운전자정액": base,
             "동승자정액": base,
             "동승자수": pax_n,
             "동승자합계": base * pax_n,
-            "합계": base,              # 운전자 1인 기준(하위호환)
+            "합계": base,
             "총합계": base + base * pax_n,
         })
         return result
 
-    # --- 관외 ---
     ilbi_unit = ALLOWANCE_RATES["일비_1일"]
     ilbi = ilbi_unit * days
     if use_official_car:
-        ilbi = ilbi // 2  # 공무용 차량 이용 시 일비 1/2 (제16조 제3항)
+        ilbi = ilbi // 2
 
     sikbi = ALLOWANCE_RATES["식비_1일"] * days
 
     sukbak_cap = ALLOWANCE_RATES.get(sukbak_region_key, ALLOWANCE_RATES["숙박비_상한_그밖"])
     sukbak = sukbak_cap * max(0, nights)
 
-    # 운임: 공무용 차량이면 운임 미지급(제15조) → 0.
-    #       자가차면 유류/전기비(배수 반영), 대중교통이면 수기입력.
     if use_official_car:
         transport = 0
-        toll_val = 0            # 관용차는 통행료도 기관 부담 → 개인 여비 0
+        toll_val = 0
     else:
         transport = manual_transport if manual_transport > 0 else fuel_cost
         transport = int(round(transport))
         toll_val = max(0, int(round(toll)))
 
-    # 각 항목 십원 미만 버림
     ilbi = floor10(ilbi)
     sikbi = floor10(sikbi)
     sukbak = floor10(sukbak)
     transport = floor10(transport)
     toll_val = floor10(toll_val)
 
-    # 운전자 1인
     driver = {
         "운임": transport,
         "일비": ilbi,
@@ -434,7 +392,6 @@ def calculate_travel_allowance(
     }
     driver["합계"] = sum(driver.values())
 
-    # 동승자 1인 단가 (운임·통행료 없음 — 같은 차 탑승)
     pax_unit = {
         "운임": 0,
         "일비": ilbi,
@@ -490,16 +447,12 @@ tab2, tab3 = st.tabs(["🧮 여비 계산", "📋 명단 일괄 처리"])
 # -------------------------------------------------------------
 # TAB 2 : 여비 계산 (단건)
 # -------------------------------------------------------------
-# 도착지 시군 버튼 (직재순, 군위 제외) → 지오코딩 접두 주소 매핑
-#   포항: 시청(본청) + 남구/북구. 세부주소 없어도 각 대표지점으로 지오코딩되도록
-#   접두를 시청 실주소·남구·북구로 구분한다.
 SIGUN_PREFIX = {
     "포항시청": "경상북도 포항시 남구 시청로 1",
     "포항남": "경상북도 포항시 남구",
     "포항북": "경상북도 포항시 북구",
     "경주": "경상북도 경주시",
     "김천": "경상북도 김천시",
-    # 안동은 도청 소재지 → 항상 관내(정액 2만원)이므로 도착지 버튼에서 제외
     "구미": "경상북도 구미시",
     "영주": "경상북도 영주시",
     "영천": "경상북도 영천시",
@@ -519,31 +472,22 @@ SIGUN_PREFIX = {
     "울진": "경상북도 울진군",
     "울릉": "경상북도 울릉군",
 }
-SIGUN_ORDER = list(SIGUN_PREFIX.keys())  # 직재순
+SIGUN_ORDER = list(SIGUN_PREFIX.keys())
 DEST_OPTIONS = SIGUN_ORDER + ["기타(직접입력)"]
 
-DEFAULT_ORIGIN = "경상북도 안동시 풍천면 도청대로 455"  # 경상북도청
+DEFAULT_ORIGIN = "경상북도 안동시 풍천면 도청대로 455"
 
 
 def build_dest_address(sigun_choice: str, detail: str) -> str:
-    """
-    시군 버튼 선택 + 세부주소 → 최종 도착지 주소.
-    - '기타' 선택: 세부주소를 그대로 사용.
-    - 시군 선택: 접두(예:'경상북도 안동시') + 세부주소.
-      단 세부주소가 이미 '경상북도'로 시작하거나 시군명을 포함하면
-      접두를 중복으로 붙이지 않고 세부주소를 그대로 쓴다.
-    """
     detail = (detail or "").strip()
     if sigun_choice == "기타(직접입력)":
         return detail
     prefix = SIGUN_PREFIX.get(sigun_choice, "")
-    # 포항시청은 고정 지점 → 세부주소 무시하고 시청 주소 그대로 사용
     if sigun_choice == "포항시청":
         return prefix
     if not detail:
-        return prefix  # 세부주소 없으면 시군 대표지점(시/군청 인근)만
-    # 접두 중복 방지: 이미 광역/시군명 들어간 전체주소를 넣은 경우
-    core = prefix.replace("경상북도 ", "")  # 예: '안동시'
+        return prefix
+    core = prefix.replace("경상북도 ", "")
     if detail.startswith("경상북도") or core in detail:
         return detail
     return f"{prefix} {detail}"
@@ -552,10 +496,6 @@ def build_dest_address(sigun_choice: str, detail: str) -> str:
 with tab2:
     st.subheader("단건 여비 계산")
 
-    # =========================================================
-    # 0) 출장 구분 (최상단) — 관내면 경로·유종·유가 불필요
-    # =========================================================
-    # 관내 자동판정에서 '관내로 전환' 버튼을 누르면 force_gwannae 신호가 들어옴 → 기본 '관내' 선택
     _default_idx = 1 if st.session_state.pop("force_gwannae", False) else 0
     g1, g2 = st.columns(2)
     trip_type = g1.radio(
@@ -576,9 +516,6 @@ with tab2:
 
     st.markdown("---")
 
-    # =========================================================
-    # 관내(정액) : 경로/유종/유가 전부 생략, 최소 입력만
-    # =========================================================
     if is_gwannae:
         st.markdown("#### 근무지 내(관내) 출장 — 정액 여비")
         st.caption("「공무원 여비 규정」 제18조: 4시간 이상 20,000원 / 4시간 미만 10,000원. "
@@ -632,11 +569,7 @@ with tab2:
         st.info("정식 여비 정산서(엑셀/HWPX) 출력 양식은 실물 양식 확보 후 셀 매핑으로 연결합니다. "
                 "출장일자·성명은 그때 엑셀 추출에 사용됩니다.")
 
-    # =========================================================
-    # 관외 : 경로 → 출장자 → 출장목적 → 유종/연비 → 단가 → 여비 합계(한 번에)
-    # =========================================================
     else:
-        # --- 1) 출장 경로 ---
         st.markdown("##### 1) 출장 경로")
         origin = st.text_input(
             "출발지 주소",
@@ -666,7 +599,6 @@ with tab2:
         if dest:
             st.caption(f"🎯 최종 도착지: **{dest}**")
 
-        # --- 2) 출장자 (운전자 + 동승자) ---
         st.markdown("##### 2) 출장자")
         nm1, nm2 = st.columns([1, 1])
         driver_name = nm1.text_input("운전자 성명", placeholder="예) 홍길동",
@@ -681,22 +613,15 @@ with tab2:
         st.caption("ⓘ 동승자는 같은 차량 탑승 기준입니다. 운임·통행료는 운전자만, "
                    "일비·식비·숙박비는 전원 각자 지급됩니다.")
 
-        # --- 3) 출장 목적 (운전자·동승자 공통 출력) ---
         st.markdown("##### 3) 출장 목적")
         trip_purpose = st.text_input(
             "출장 목적", placeholder="예) ○○ 지적재조사 지구 현장 확인",
             help="운전자·동승자 모두 동일하게 출력됩니다. (실물 양식 확보 후 위치·문구 조정 예정)",
         )
 
-        # --- 4) 출장 기간 (시작일·종료일) ---
-        #   유가 기준일 = 출장 시작일 (규정/실무: 출발일 유가 적용).
-        #   시작일을 먼저 받아 아래 단가의 유가 기준일로 자동 연결한다.
         st.markdown("##### 4) 출장 기간")
         hours_over_4 = True
 
-        # 종료일 자동 연동: 시작일을 바꾸면 종료일을 항상 시작일로 초기화(당일치기 기본).
-        #   → 대부분 당일 출장이므로 시작일만 누르면 종료일이 같은 날로 맞춰지고,
-        #     1박 이상일 때만 종료일을 뒤로 조정하면 된다.
         def _sync_end_date():
             s = st.session_state.get("trip_start_key")
             if s is not None:
@@ -716,14 +641,10 @@ with tab2:
             "출장 종료일", key="trip_end_key",
             help="당일치기면 그대로 두세요. 1박 이상이면 시작일을 먼저 고른 뒤 종료일만 뒤로 조정하세요.")
 
-        # 종료일 < 시작일 방지 (콜백 이후에도 안전장치)
         if trip_end < trip_start:
             st.error("종료일이 시작일보다 빠릅니다. 날짜를 다시 확인하세요.")
             trip_end = trip_start
 
-        # 여행일수·밤수 자동 계산
-        #   일비·식비 일수 = (종료일 - 시작일) + 1  (당일치기 = 1일)
-        #   숙박 밤 수     = (종료일 - 시작일)       (당일치기 = 0박)
         span = (trip_end - trip_start).days
         days = span + 1
         nights = span
@@ -737,7 +658,6 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        # --- 5) 차량 유종 / 연비 ---
         st.markdown("##### 5) 차량 유종 / 연비 (규정 표준값)")
         st.caption("「공무원 여비업무 처리기준(2023.1.18.)」 유종별 표준 연비를 기본값으로 적용합니다. "
                    "실측값이 있으면 수정하세요.")
@@ -754,7 +674,6 @@ with tab2:
                        f"전비 {PHEV_ELEC_EFF} km/kWh가 모두 제시됩니다. 기본은 연비 기준이며, "
                        f"전기 운행분으로 계산하려면 유종을 '전기'로 바꾸거나 위 값을 전비로 수정하세요.")
 
-        # --- 6) 단가 (유가 기준일 = 출장 시작일 자동) ---
         st.markdown("##### 6) 단가 (유가 또는 전기요금)")
         hist = load_oil_history()
 
@@ -774,7 +693,6 @@ with tab2:
                           help="하이브리드·PHEV는 휘발유 유가를 기준으로 합니다.")
             region = c7.selectbox("지역 기준", ["경북", "전국"],
                                   help="여비 규정에 명시된 유가 기준에 맞춰 선택하세요. 기본값은 경북입니다.")
-            # 유가 기준일 = 출장 시작일 (자동, 수정 불가 표시)
             sel_date = trip_start.isoformat()
             c8.text_input("유가 기준일 (= 출장 시작일)", value=sel_date, disabled=True,
                           help="규정상 출장 시작일의 유가를 적용합니다. 위 '출장 시작일'을 바꾸면 자동으로 바뀝니다.")
@@ -797,7 +715,6 @@ with tab2:
                 st.caption("ⓘ 유가 누적 데이터가 아직 쌓이지 않았습니다. GitHub Actions가 매일 수집하며, "
                            "며칠 후부터 자동 적용됩니다. 그전까지는 유가를 수기 입력하세요.")
 
-        # --- 7) 여비 산정 입력 (숙박지역·운임·통행료) ---
         st.markdown("##### 7) 여비 산정 입력")
         st.caption("「공무원 여비 규정」 준용. 단가는 상단 ALLOWANCE_RATES 기본값(국가 규정)입니다. "
                    "경상북도 별도 조례가 없어 국가 규정을 그대로 적용합니다. 운임은 왕복(편도×2)으로 계산합니다.")
@@ -807,7 +724,6 @@ with tab2:
             index=2, help="서울 10만 / 광역시 8만 / 그 밖 7만 (실비, 상한 이내)")
         sukbak_region_key = SUKBAK_REGION[sukbak_region_label]
 
-        # 왕복 배수 결정: 기본 왕복 1회(×2). 단, 숙박 0박 + 일수 2일 이상이면 매일 출퇴근 → ×2×일수
         daily_commute = (int(nights) == 0 and int(days) >= 2)
         round_multiplier = 2 * (int(days) if daily_commute else 1)
         if daily_commute:
@@ -816,8 +732,6 @@ with tab2:
         else:
             st.caption("🚗 운임·통행료는 **편도 × 2(왕복 1회)**로 계산합니다.")
 
-        # 통행료: 직전 계산에서 받은 카카오 편도값 × 왕복배수를 입력칸 기본값으로.
-        #   (이 두 변수는 아래 통행료 입력칸과 안내문에서 사용되므로 반드시 여기서 정의)
         last_toll_oneway = int(st.session_state.get("last_toll_oneway", 0))
         applied_toll_default = last_toll_oneway * round_multiplier
 
@@ -838,7 +752,6 @@ with tab2:
             st.caption(f"ⓘ 통행료 기본값 {applied_toll_default:,} 원 "
                        f"(직전 계산 편도 {last_toll_oneway:,} × {round_multiplier})")
 
-        # --- 여비 합계 계산 (거리→운임→여비 한 번에) ---
         st.markdown("---")
         if st.button("💰 여비 합계 계산", type="primary", key="calc_all"):
             if not origin or not dest:
@@ -864,7 +777,6 @@ with tab2:
                         st.session_state["last_dist_km_oneway"] = dist_km_oneway
                         st.session_state["last_toll_oneway"] = toll_oneway
 
-                        # 관내 자동판정 (버튼은 최상단에서 처리 → 여기선 세션에 신호만 저장)
                         cand, why = check_gwannae_candidate(origin, dest, dist_km_oneway)
                         if cand:
                             st.warning(f"🏠 **관내 출장 후보**입니다 — {why}\n\n"
@@ -873,20 +785,15 @@ with tab2:
                             st.button("→ 관내(정액)로 전환", key="switch_to_gwannae",
                                       type="primary", on_click=_switch_to_gwannae)
 
-                        # 왕복 주행거리
                         applied_dist = dist_km_oneway * round_multiplier
-                        # 통행료: 이번에 받은 카카오 편도값 × 배수를 자동 반영(첫 실행부터).
-                        #   단 사용자가 통행료 입력칸을 직접 고쳐 넣었으면(=자동 기본값과 다르면) 그 값을 존중.
                         auto_toll = toll_oneway * round_multiplier
                         if int(toll_input) > 0 and int(toll_input) != int(applied_toll_default):
-                            applied_toll = int(toll_input)   # 사용자가 수기로 바꾼 값
+                            applied_toll = int(toll_input)
                         else:
-                            applied_toll = auto_toll          # 자동 계산값
+                            applied_toll = auto_toll
 
-                        # 자가차 유류/전기비
                         fuel_cost_val = calc_fuel_cost(applied_dist, eff, oil_price)
 
-                        # 경로·거리 요약
                         m1, m2, m3 = st.columns(3)
                         m1.metric("도로거리(편도)", f"{dist_km_oneway:,.1f} km")
                         m2.metric(f"적용거리(×{round_multiplier})", f"{applied_dist:,.1f} km")
@@ -895,7 +802,6 @@ with tab2:
                                    f"편도 통행료 {toll_oneway:,}원 × {round_multiplier} = {auto_toll:,}원 · "
                                    f"예상 소요(편도) {route['duration_s']//60}분")
 
-                        # 여비 산출
                         res = calculate_travel_allowance(
                             is_gwannae=False,
                             hours_over_4=hours_over_4,
@@ -946,124 +852,11 @@ with tab2:
 
 
 # -------------------------------------------------------------
-# TAB 3 : 명단 일괄 처리
+# TAB 3 : 명단 일괄 처리 → 여비 지급명세서 엑셀 출력
 # -------------------------------------------------------------
 with tab3:
-    st.subheader("출장자 명단 일괄 처리")
-    st.markdown(
-        "명단 엑셀을 업로드하면 전원 거리·운임을 한 번에 계산합니다. "
-        "**업로드 파일은 처리만 하며 서버에 저장하지 않습니다.**"
+    render_tab3(
+        geocode_full=geocode_full,
+        KAKAO_REST_KEY=KAKAO_REST_KEY,
+        fuel_price_map=None,
     )
-
-    template = pd.DataFrame({
-        "성명": ["홍길동"],
-        "직급": ["주무관"],
-        "출발지": ["경상북도 안동시 풍천면 도청대로 455"],
-        "도착지": ["경상북도 경주시 ○○로 123"],
-        "유종": ["휘발유"],
-        "출장일수": [1],
-        "운임배수": [2],
-    })
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        template.to_excel(w, index=False, sheet_name="명단")
-    st.download_button("📥 명단 양식 다운로드", buf.getvalue(),
-                       file_name="출장자_명단_양식.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption("※ 유종은 휘발유/경유/LPG/하이브리드/플러그인하이브리드/전기 중 입력. "
-               "연비는 규정 표준값이 자동 적용됩니다. 운임배수는 편도에 곱할 값(표준 왕복=2).")
-
-    up = st.file_uploader("작성한 명단 업로드 (.xlsx)", type=["xlsx"])
-    if up is not None:
-        try:
-            df_in = pd.read_excel(up)
-            st.write("업로드된 명단:")
-            st.dataframe(df_in, width="stretch")
-
-            if st.button("전원 계산 실행", type="primary"):
-                results = []
-                prog = st.progress(0.0)
-                for i, r in df_in.iterrows():
-                    origin_addr = str(r.get("출발지", ""))
-                    dest_addr = str(r.get("도착지", ""))
-                    o_res = geocode_full(origin_addr)
-                    d_res = geocode_full(dest_addr)
-                    o_xy = o_res["xy"] if o_res["ok"] else None
-                    d_xy = d_res["xy"] if d_res["ok"] else None
-
-                    # 실패사유 정리 (지오코딩 단계)
-                    fail_reasons = []
-                    if not o_res["ok"]:
-                        fail_reasons.append(f"출발지[{o_res['method']}]:{o_res['reason']}")
-                    if not d_res["ok"]:
-                        fail_reasons.append(f"도착지[{d_res['method']}]:{d_res['reason']}")
-
-                    route = get_road_distance(o_xy, d_xy) if (o_xy and d_xy) else None
-                    ok = bool(route and route.get("ok"))
-                    if (o_xy and d_xy) and not ok and route is not None:
-                        fail_reasons.append(f"길찾기:{route.get('reason', '알 수 없음')}")
-
-                    dist_km_oneway = route["distance_m"] / 1000 if ok else None
-                    toll_oneway = int(route["toll"]) if ok else None
-
-                    try:
-                        mult = int(r.get("운임배수", 2))
-                    except Exception:
-                        mult = 2
-                    if mult < 1:
-                        mult = 1
-
-                    dist_applied = dist_km_oneway * mult if dist_km_oneway is not None else None
-                    toll_applied = toll_oneway * mult if toll_oneway is not None else None
-
-                    ft = str(r.get("유종", "휘발유")).strip()
-                    std = FUEL_STANDARDS.get(ft)
-                    eff_val = std["eff"] if std else None
-                    eff_unit = std["unit"] if std else "-"
-
-                    # 관내 자동판정 (일괄에서도 사유 표기)
-                    cand, why = check_gwannae_candidate(origin_addr, dest_addr, dist_km_oneway)
-
-                    results.append({
-                        "성명": r.get("성명"),
-                        "직급": r.get("직급"),
-                        "출발지": r.get("출발지"),
-                        "도착지": r.get("도착지"),
-                        "유종": ft,
-                        "표준연비/전비": f"{eff_val} {eff_unit}" if eff_val else "유종 확인",
-                        "편도(km)": round(dist_km_oneway, 1) if dist_km_oneway else "조회실패",
-                        "운임배수": mult,
-                        "적용거리(km)": round(dist_applied, 1) if dist_applied else "조회실패",
-                        "통행료(원)": toll_applied if toll_applied is not None else "조회실패",
-                        "출장일수": r.get("출장일수"),
-                        "관내후보": "예" if cand else "아니오",
-                        "관내판정사유": why if cand else "",
-                        "실패사유": " / ".join(fail_reasons) if fail_reasons else "",
-                    })
-                    prog.progress((i + 1) / len(df_in))
-                    time.sleep(0.05)
-
-                res_df = pd.DataFrame(results)
-                st.success("계산 완료")
-                st.dataframe(res_df, width="stretch")
-
-                # 실패 행 요약
-                fail_cnt = int((res_df["실패사유"] != "").sum())
-                if fail_cnt > 0:
-                    st.warning(f"⚠️ 조회 실패 {fail_cnt}건 — '실패사유' 열에서 원인을 확인하세요. "
-                               "(주소 형식 문제면 시·군 포함 전체주소로 수정, 401/403이면 카카오 앱 설정)")
-                cand_cnt = int((res_df["관내후보"] == "예").sum())
-                if cand_cnt > 0:
-                    st.info(f"🏠 관내 출장 후보 {cand_cnt}건 — '관내판정사유' 열을 확인하세요. "
-                            "(호명읍 특례 또는 편도 12km 미만)")
-
-                out = io.BytesIO()
-                with pd.ExcelWriter(out, engine="openpyxl") as w:
-                    res_df.to_excel(w, index=False, sheet_name="여비산정결과")
-                st.download_button("📤 결과 엑셀 다운로드", out.getvalue(),
-                                   file_name="여비산정_결과.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        except Exception as e:
-            st.error(f"파일 처리 오류: {e}")
-
-    st.caption("※ 여비 최종 합산·정식 출력양식은 실물 자료 확보 후 반영 예정.")
