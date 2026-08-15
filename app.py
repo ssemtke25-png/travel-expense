@@ -682,13 +682,31 @@ with tab2:
         #   시작일을 먼저 받아 아래 단가의 유가 기준일로 자동 연결한다.
         st.markdown("##### 4) 출장 기간")
         hours_over_4 = True
-        d0, d1 = st.columns(2)
-        trip_start = d0.date_input("출장 시작일", value=date.today(),
-                                   help="달력에서 출장 시작일을 고르세요. 이 날짜가 유가 기준일로 자동 적용됩니다.")
-        trip_end = d1.date_input("출장 종료일", value=date.today(),
-                                 help="달력에서 종료일을 고르세요. 당일치기면 시작일과 같게 두세요.")
 
-        # 종료일 < 시작일 방지
+        # 종료일 자동 연동: 시작일을 바꾸면, 종료일이 시작일보다 앞서 있을 때만 시작일로 맞춘다.
+        #   → 당일치기는 시작일만 누르면 종료일이 자동으로 같은 날이 되고,
+        #     1박 이상은 종료일을 뒤로 조정하면 그대로 유지된다.
+        def _sync_end_date():
+            s = st.session_state.get("trip_start_key")
+            e = st.session_state.get("trip_end_key")
+            if s is not None and (e is None or e < s):
+                st.session_state["trip_end_key"] = s
+
+        if "trip_start_key" not in st.session_state:
+            st.session_state["trip_start_key"] = date.today()
+        if "trip_end_key" not in st.session_state:
+            st.session_state["trip_end_key"] = date.today()
+
+        d0, d1 = st.columns(2)
+        trip_start = d0.date_input(
+            "출장 시작일", key="trip_start_key", on_change=_sync_end_date,
+            help="달력에서 출장 시작일을 고르세요. 종료일이 자동으로 같은 날로 맞춰집니다(당일치기 기본). "
+                 "이 날짜가 유가 기준일로도 자동 적용됩니다.")
+        trip_end = d1.date_input(
+            "출장 종료일", key="trip_end_key",
+            help="당일치기면 그대로 두세요. 1박 이상이면 종료일만 뒤로 조정하세요.")
+
+        # 종료일 < 시작일 방지 (콜백 이후에도 안전장치)
         if trip_end < trip_start:
             st.error("종료일이 시작일보다 빠릅니다. 날짜를 다시 확인하세요.")
             trip_end = trip_start
@@ -699,8 +717,15 @@ with tab2:
         span = (trip_end - trip_start).days
         days = span + 1
         nights = span
-        st.caption(f"ⓘ 출장 기간: **{trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}** "
-                   f"→ **{nights}박 {days}일** (일비·식비 {days}일分, 숙박 {nights}박分 자동 계산)")
+        st.markdown(
+            f"""<div style="background:#eaf4ff;border:2px solid #2b7cff;border-radius:8px;
+            padding:12px 16px;margin:8px 0;font-size:1.05rem;">
+            📅 <b>출장 기간: {trip_start:%Y-%m-%d} ~ {trip_end:%Y-%m-%d}</b>
+            &nbsp;→&nbsp; <b style="color:#c0392b;font-size:1.15rem;">{nights}박 {days}일</b>
+            <br><span style="color:#333;">일비·식비 <b>{days}일</b>分 · 숙박 <b>{nights}박</b>分 자동 계산</span>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
         # --- 5) 차량 유종 / 연비 ---
         st.markdown("##### 5) 차량 유종 / 연비 (규정 표준값)")
