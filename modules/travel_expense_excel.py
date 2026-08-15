@@ -166,16 +166,21 @@ class Person:
         eff = FUEL_STANDARDS.get(self.유종, FUEL_STANDARDS["휘발유"])["eff"]
 
         # --- 유류비 (자차·운전자만) ---
+        # 십원 미만 버림은 '왕복 합산 후 한 번만' 적용(편도별로 각각 버리지 않음).
         if self.is_driver and not self.use_official_car:
-            fuel_go = floor10(calc_fuel_cost(self.갈때거리_km, eff, self.유가))
-            fuel_back = floor10(calc_fuel_cost(self.올때거리_km, eff, self.유가))
-            toll_go = floor10(self.통행료_갈때)
-            toll_back = floor10(self.통행료_올때)
+            fuel_go_raw = calc_fuel_cost(self.갈때거리_km, eff, self.유가)
+            fuel_back_raw = calc_fuel_cost(self.올때거리_km, eff, self.유가)
+            운임 = floor10(fuel_go_raw + fuel_back_raw)         # 합산 후 버림
+            통행료 = floor10(self.통행료_갈때 + self.통행료_올때)  # 합산 후 버림
+            # 명세서 표시용 편도값: 반올림 정수(합계와의 오차는 갈때행에 흡수)
+            fuel_back = int(round(fuel_back_raw))
+            fuel_go = 운임 - fuel_back                            # 갈때 = 운임 - 올때(합계 일치 보장)
+            toll_back = int(self.통행료_올때)
+            toll_go = 통행료 - toll_back
         else:
             fuel_go = fuel_back = toll_go = toll_back = 0
-
-        운임 = fuel_go + fuel_back
-        통행료 = toll_go + toll_back
+            운임 = 0
+            통행료 = 0
 
         # --- 일비 (공무차 1/2) ---
         ilbi = ALLOWANCE["일비_1일"] * self.days
