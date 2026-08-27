@@ -91,7 +91,7 @@ def render_simple_tab(*, ctx):
         if not hist.empty:
             auto_p = lookup_oil_price(hist, start.isoformat(), region, oil_fuel)
         oil_price = float(auto_p) if auto_p is not None else 0.0
-        dt[4].metric("적용 유가", f"{oil_price:,.1f} 원/L" if oil_price else "데이터 없음")
+        dt[4].metric("적용 유가", f"{oil_price:,.2f} 원/L" if oil_price else "데이터 없음")
 
     if end < start:
         st.error("종료일이 시작일보다 빠릅니다.")
