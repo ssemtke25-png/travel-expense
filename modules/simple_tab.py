@@ -70,7 +70,7 @@ def render_simple_tab(*, ctx):
 
     def _sync_end():
         s = st.session_state.get("sx_start")
-        if s is not None and st.session_state.get("sx_end", s) < s:
+        if s is not None:
             st.session_state["sx_end"] = s
 
     start = dt[0].date_input("출장 시작일", key="sx_start", on_change=_sync_end)
