@@ -3,12 +3,12 @@
 공무원 출장 여비 산정 시스템 (골격 버전 + 지오코딩 진단 + 관내 자동판정)
 --------------------------------------------------
 구성
-  1) 유가 조회 탭      : 오피넷 무료 API (전국/시도/시군)
+  1) 여비 계산(간소화) 탭 : 경로·기간·유종·유가·공무용차량만으로 여비 총액 즉시 산출
   2) 여비 계산 탭      : 주소→좌표(카카오 지오코딩) → 도로거리(카카오모빌리티)
                          → 규정 표준 연비/전비 → 유류비(왕복),
                          그 위에 일비·식비·숙박비·통행료 구조
                          + 관내 자동판정(호명읍 특례 + 12km) — 제안 후 사용자 전환
-  3) 일괄 처리 탭      : 출장자 명단 엑셀 업로드 → 전원 계산 → 여비 지급명세서 엑셀 출력
+  3) 명단 일괄 처리 탭  : 출장자 명단 엑셀 업로드 → 전원 계산 → 여비 지급명세서 엑셀 출력
 
 설계 원칙
   - 저장 기능 없음 (세션 동안만 유지). 개인정보 서버 미보관.
@@ -28,6 +28,7 @@ from modules.travel_expense_excel import (
     get_road_distance_waypoints,
 )
 from modules.tab3_integration import render_tab3
+from modules.simple_tab import render_simple_tab
 import requests
 import pandas as pd
 import streamlit as st
@@ -108,6 +109,55 @@ OPINET_BASE = "https://www.opinet.co.kr/api"
 KAKAO_GEOCODE_URL = "https://dapi.kakao.com/v2/local/search/address.json"
 KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 KAKAO_DIRECTIONS_URL = "https://apis-navi.kakaomobility.com/v1/directions"
+
+
+# =============================================================
+# 도착지 시군 상수 (간소화 탭 + 상세 탭 공용 — 모듈 레벨)
+# =============================================================
+SIGUN_PREFIX = {
+    "포항시청": "경상북도 포항시 남구 시청로 1",
+    "포항남": "경상북도 포항시 남구",
+    "포항북": "경상북도 포항시 북구",
+    "경주": "경상북도 경주시",
+    "김천": "경상북도 김천시",
+    "구미": "경상북도 구미시",
+    "영주": "경상북도 영주시",
+    "영천": "경상북도 영천시",
+    "상주": "경상북도 상주시",
+    "문경": "경상북도 문경시",
+    "경산": "경상북도 경산시",
+    "의성": "경상북도 의성군",
+    "청송": "경상북도 청송군",
+    "영양": "경상북도 영양군",
+    "영덕": "경상북도 영덕군",
+    "청도": "경상북도 청도군",
+    "고령": "경상북도 고령군",
+    "성주": "경상북도 성주군",
+    "칠곡": "경상북도 칠곡군",
+    "예천": "경상북도 예천군",
+    "봉화": "경상북도 봉화군",
+    "울진": "경상북도 울진군",
+    "울릉": "경상북도 울릉군",
+}
+SIGUN_ORDER = list(SIGUN_PREFIX.keys())
+DEST_OPTIONS = SIGUN_ORDER + ["기타(직접입력)"]
+
+DEFAULT_ORIGIN = "경상북도 안동시 풍천면 도청대로 455"
+
+
+def build_dest_address(sigun_choice: str, detail: str) -> str:
+    detail = (detail or "").strip()
+    if sigun_choice == "기타(직접입력)":
+        return detail
+    prefix = SIGUN_PREFIX.get(sigun_choice, "")
+    if sigun_choice == "포항시청":
+        return prefix
+    if not detail:
+        return prefix
+    core = prefix.replace("경상북도 ", "")
+    if detail.startswith("경상북도") or core in detail:
+        return detail
+    return f"{prefix} {detail}"
 
 
 # =============================================================
@@ -454,58 +504,33 @@ with st.expander("🔑 API 연결 상태 확인 / 지오코딩 진단", expanded
         st.caption("여기서 뜨는 메시지가 실제 원인입니다. "
                    "401/403이면 카카오 앱 설정, 0건이면 주소 형식, 미설정이면 Secrets 문제입니다.")
 
-tab2, tab3 = st.tabs(["🧮 여비 계산", "📋 명단 일괄 처리"])
+tab1, tab2, tab3 = st.tabs(["⚡ 여비 계산(간소화)", "🧮 여비 계산", "📋 명단 일괄 처리"])
+
+
+# -------------------------------------------------------------
+# TAB 1 : 여비 계산 (간소화)
+# -------------------------------------------------------------
+with tab1:
+    render_simple_tab(ctx={
+        "geocode_debug": geocode_debug,
+        "get_road_distance": get_road_distance,
+        "calculate_travel_allowance": calculate_travel_allowance,
+        "calc_fuel_cost": calc_fuel_cost,
+        "load_oil_history": load_oil_history,
+        "lookup_oil_price": lookup_oil_price,
+        "FUEL_STANDARDS": FUEL_STANDARDS,
+        "OIL_PRICE_FUEL_MAP": OIL_PRICE_FUEL_MAP,
+        "DEFAULT_ELEC_PRICE": DEFAULT_ELEC_PRICE,
+        "SIGUN_PREFIX": SIGUN_PREFIX,
+        "DEST_OPTIONS": DEST_OPTIONS,
+        "DEFAULT_ORIGIN": DEFAULT_ORIGIN,
+        "build_dest_address": build_dest_address,
+    })
 
 
 # -------------------------------------------------------------
 # TAB 2 : 여비 계산 (단건)
 # -------------------------------------------------------------
-SIGUN_PREFIX = {
-    "포항시청": "경상북도 포항시 남구 시청로 1",
-    "포항남": "경상북도 포항시 남구",
-    "포항북": "경상북도 포항시 북구",
-    "경주": "경상북도 경주시",
-    "김천": "경상북도 김천시",
-    "구미": "경상북도 구미시",
-    "영주": "경상북도 영주시",
-    "영천": "경상북도 영천시",
-    "상주": "경상북도 상주시",
-    "문경": "경상북도 문경시",
-    "경산": "경상북도 경산시",
-    "의성": "경상북도 의성군",
-    "청송": "경상북도 청송군",
-    "영양": "경상북도 영양군",
-    "영덕": "경상북도 영덕군",
-    "청도": "경상북도 청도군",
-    "고령": "경상북도 고령군",
-    "성주": "경상북도 성주군",
-    "칠곡": "경상북도 칠곡군",
-    "예천": "경상북도 예천군",
-    "봉화": "경상북도 봉화군",
-    "울진": "경상북도 울진군",
-    "울릉": "경상북도 울릉군",
-}
-SIGUN_ORDER = list(SIGUN_PREFIX.keys())
-DEST_OPTIONS = SIGUN_ORDER + ["기타(직접입력)"]
-
-DEFAULT_ORIGIN = "경상북도 안동시 풍천면 도청대로 455"
-
-
-def build_dest_address(sigun_choice: str, detail: str) -> str:
-    detail = (detail or "").strip()
-    if sigun_choice == "기타(직접입력)":
-        return detail
-    prefix = SIGUN_PREFIX.get(sigun_choice, "")
-    if sigun_choice == "포항시청":
-        return prefix
-    if not detail:
-        return prefix
-    core = prefix.replace("경상북도 ", "")
-    if detail.startswith("경상북도") or core in detail:
-        return detail
-    return f"{prefix} {detail}"
-
-
 with tab2:
     st.subheader("단건 여비 계산")
 
@@ -566,7 +591,7 @@ with tab2:
                 st.markdown(
                     """<div style="background:#fff4e5;border:2px solid #f39c12;border-radius:8px;
                     padding:10px 14px;margin:6px 0;">
-                    🚙 <b>공무용 차량 이용</b> → 관내 정액에서 <b style="color:#c0392b;">1만원 감액</b> 적용됨
+                    🚙 <b>공무용 차량</b> → 관내 정액에서 <b style="color:#c0392b;">1만원 감액</b> 적용됨
                     (기름값·통행료는 기관 부담)</div>""",
                     unsafe_allow_html=True,
                 )
@@ -840,7 +865,7 @@ with tab2:
                             st.markdown(
                                 """<div style="background:#fff4e5;border:2px solid #f39c12;border-radius:8px;
                                 padding:10px 14px;margin:6px 0;">
-                                🚙 <b>공무용 차량 이용</b> → <b style="color:#c0392b;">운임·통행료 0원</b>,
+                                🚙 <b>공무용 차량</b> → <b style="color:#c0392b;">운임·통행료 0원</b>,
                                 <b style="color:#c0392b;">일비 1/2 감액</b> 적용됨 (기름값·통행료는 기관 부담)</div>""",
                                 unsafe_allow_html=True,
                             )
