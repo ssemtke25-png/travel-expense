@@ -3,7 +3,7 @@
 간소화 여비 계산 탭 (render_simple_tab)
 ------------------------------------------------
 서무용 빠른 계산기. 경로·기간·유종·유가·공무용차량만 정하면 여비 총액 즉시 산출.
-고정값: 숙박=그 밖의 지역(7만), 동승자 0명, 통행료=카카오 자동값, 관외 전용.
+고정값: 숙박=그 밖의 지역(7만), 동승자 0명, 관외 전용. 통행료는 수기입력(비우면 0).
 
 app.py 의 기존 함수/상수를 인자로 받아 재사용 → 로직 중복 없음.
 """
@@ -36,7 +36,7 @@ def render_simple_tab(*, ctx):
 
     st.markdown("#### ⚡ 빠른 여비 계산")
     st.caption("경로 · 기간 · 유종 · 유가 · 공무용차량만 정하면 여비 총액이 바로 나옵니다. "
-               "숙박=그 밖 지역, 통행료=카카오 자동값, 동승자 없음으로 계산합니다. "
+               "숙박=그 밖 지역, 동승자 없음으로 계산합니다. 통행료는 넣으면 반영, 비우면 없이 계산합니다. "
                "정확한 정산(숙박지역·통행료 실비·동승자)은 '여비 계산' 탭에서.")
 
     # ── ① 출발지 + 공무용차량 ──
@@ -93,6 +93,13 @@ def render_simple_tab(*, ctx):
         oil_price = float(auto_p) if auto_p is not None else 0.0
         dt[4].metric("적용 유가", f"{oil_price:,.2f} 원/L" if oil_price else "데이터 없음")
 
+    # ── 통행료 수기입력 (왕복 실비) ──
+    toll_input = st.number_input(
+        "통행료(원, 왕복) — 넣으면 자동 반영, 비우면 통행료 없이 계산",
+        min_value=0, value=0, step=100, key="sx_toll",
+        help="하이패스 할인·경로에 따라 실제 통행료가 다르므로 직접 입력합니다. "
+             "0이면 통행료 없이 계산됩니다. 공무용 차량이면 자동으로 0 처리됩니다.")
+
     if end < start:
         st.error("종료일이 시작일보다 빠릅니다.")
         end = start
@@ -136,15 +143,16 @@ def render_simple_tab(*, ctx):
 
         dist_oneway = route["distance_m"] / 1000
         applied_dist = dist_oneway * round_mult
-        # 통행료: 카카오 자동값 사용(간소화). 공무차면 계산 함수가 0 처리.
-        auto_toll = int(route.get("toll", 0)) * (round_mult // 2 if round_mult >= 2 else 1)
+        # (통행료는 위 수기입력칸 applied_toll 사용)
+        # 통행료: 사용자 수기입력(왕복 실비). 공무차면 계산 함수가 0 처리.
+        applied_toll = int(toll_input)
         fuel_cost_val = calc_fuel_cost(applied_dist, std["eff"], oil_price)
 
         res = calculate_travel_allowance(
             is_gwannae=False, hours_over_4=True, use_official_car=use_car,
             days=days, nights=nights, sukbak_region_key="숙박비_상한_그밖",
             fuel_cost=fuel_cost_val, manual_transport=0.0,
-            toll=float(auto_toll), num_passengers=0,
+            toll=float(applied_toll), num_passengers=0,
         )
 
         st.markdown("---")
@@ -164,5 +172,5 @@ def render_simple_tab(*, ctx):
         r[5].metric("총 여비", f"{drv['합계']:,} 원")
         st.success(f"총 여비 합계: {drv['합계']:,} 원  ·  편도 {dist_oneway:,.1f}km · "
                    f"적용거리 {applied_dist:,.1f}km")
-        st.caption("※ 십원 미만 버림. 숙박=그 밖 지역, 통행료=카카오 자동값, 동승자 없음. "
+        st.caption("※ 십원 미만 버림. 숙박=그 밖 지역, 동승자 없음. 통행료는 입력값 반영. "
                    "정확한 정산은 '여비 계산' 탭에서.")
